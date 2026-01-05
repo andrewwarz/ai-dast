@@ -42,7 +42,7 @@ from scanner.http_client import (
     InvalidURLError,
 )
 from scanner.report_generator import generate_report, save_report, SEVERITY_ICONS
-from scanner.scanner import DASTScanner
+from scanner.scanner import DASTScanner, ScanProgress, ScanPhase
 
 
 # =============================================================================
@@ -242,6 +242,54 @@ def print_progress(message: str, emoji: str = "🔍") -> None:
     print(f"[{timestamp}] {emoji} {message}")
 
 
+# Track last progress line for overwriting
+_last_progress_len = 0
+
+
+def print_scan_progress(progress: ScanProgress, quiet: bool = False) -> None:
+    """Print real-time scan progress with overwriting previous line.
+
+    Args:
+        progress: ScanProgress object with current state.
+        quiet: If True, don't print anything.
+    """
+    global _last_progress_len
+
+    if quiet:
+        return
+
+    # Format the progress line
+    timestamp = time.strftime("%H:%M:%S")
+    status_line = progress.format_status_line()
+    line = f"\r[{timestamp}] {status_line}"
+
+    # Pad with spaces to overwrite previous line
+    padding = max(0, _last_progress_len - len(line))
+    print(f"{line}{' ' * padding}", end="", flush=True)
+    _last_progress_len = len(line)
+
+    # Print newline on phase changes for permanent log
+    if progress.phase in (ScanPhase.DISCOVERY, ScanPhase.ANALYSIS,
+                          ScanPhase.ATTACK, ScanPhase.EXPLOITATION):
+        if progress.phase_progress == 0 or progress.phase_progress >= 99:
+            print()  # Newline to preserve this progress line
+            _last_progress_len = 0
+
+
+def create_progress_callback(quiet: bool = False):
+    """Create a progress callback function for the scanner.
+
+    Args:
+        quiet: If True, callback does nothing.
+
+    Returns:
+        Callback function that accepts ScanProgress.
+    """
+    def callback(progress: ScanProgress) -> None:
+        print_scan_progress(progress, quiet=quiet)
+    return callback
+
+
 def format_duration(seconds: float) -> str:
     """Format duration as human-readable string."""
     if seconds < 60:
@@ -262,6 +310,12 @@ def print_summary(scan_results: dict, report_path: str) -> None:
     duration = stats.get("duration_seconds", 0)
     total_requests = stats.get("total_requests", 0)
     endpoints = stats.get("unique_endpoints_tested", 0)
+
+    # Attack vector stats
+    attack_vectors_identified = stats.get("attack_vectors_identified", 0)
+    attack_vectors_tested = stats.get("attack_vectors_tested", 0)
+    attack_vectors_vulnerable = stats.get("attack_vectors_vulnerable", 0)
+    forms_discovered = stats.get("forms_discovered", 0)
 
     # Count by severity
     severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Informational": 0}
@@ -285,11 +339,19 @@ def print_summary(scan_results: dict, report_path: str) -> None:
         provider_display = model_info.get('provider', 'ollama')
 
     print("  📊 Scan Statistics")
-    print(f"     • Duration:    {format_duration(duration)}")
-    print(f"     • Requests:    {total_requests}")
-    print(f"     • Endpoints:   {endpoints}")
-    print(f"     • Provider:    {provider_display}")
-    print(f"     • Model:       {model_name}")
+    print(f"     • Duration:       {format_duration(duration)}")
+    print(f"     • Requests:       {total_requests}")
+    print(f"     • Endpoints:      {endpoints}")
+    print(f"     • Forms Found:    {forms_discovered}")
+    print(f"     • Provider:       {provider_display}")
+    print(f"     • Model:          {model_name}")
+    print()
+
+    # Attack vector summary
+    print("  🎯 Attack Vector Analysis")
+    print(f"     • Vectors Identified:  {attack_vectors_identified}")
+    print(f"     • Vectors Tested:      {attack_vectors_tested}")
+    print(f"     • Vectors Vulnerable:  {attack_vectors_vulnerable}")
     print()
 
     # Vulnerability summary
@@ -388,9 +450,12 @@ def main() -> int:
     else:
         effective_provider, _ = get_effective_provider_and_model(model_arg)
 
-    # Initialize scanner
+    # Initialize scanner with progress callback
     if not args.quiet:
         print_progress("Initializing scanner...", "🚀")
+
+    # Create progress callback for real-time updates
+    progress_callback = create_progress_callback(quiet=args.quiet)
 
     try:
         scanner = DASTScanner(
@@ -401,6 +466,7 @@ def main() -> int:
             proxy=args.proxy,
             model=model_arg,
             provider=args.provider,
+            progress_callback=progress_callback,
         )
 
     except OllamaConnectionError as e:
@@ -474,10 +540,14 @@ def main() -> int:
 
     # Execute scan
     if not args.quiet:
-        print_progress("Starting reconnaissance...", "🔍")
+        print()
+        print_progress("Starting scan phases: Discovery → Analysis → Attack", "🚀")
+        print()
 
     try:
         scan_results = scanner.scan()
+        # Ensure we're on a new line after progress updates
+        print()
     except HTTPConnectionError as e:
         print_error(
             f"Cannot connect to target: {args.target}",

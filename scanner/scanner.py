@@ -46,6 +46,8 @@ from scanner.prompts import (
     PAYLOAD_GENERATION_PROMPT,
     SQLI_EXPLOITATION_PROMPT,
     CREDENTIAL_LOGIN_PROMPT,
+    ATTACK_VECTOR_ANALYSIS_PROMPT,
+    SMART_ATTACK_PROMPT,
     format_prompt,
 )
 
@@ -153,6 +155,199 @@ class FormData:
     endpoint: str
 
 
+@dataclass
+class AttackVector:
+    """Represents a discovered attack surface to be tested.
+
+    This dataclass captures information about a potential attack point
+    discovered during the reconnaissance phase. The LLM analyzes each
+    element and suggests what attack types would be effective.
+
+    Attributes:
+        id: Unique identifier for this attack vector.
+        url: The URL where this attack vector exists.
+        endpoint: The endpoint path.
+        method: HTTP method to use (GET/POST).
+        element_type: Type of element (form, url_param, header, cookie, etc.).
+        element_name: Name of the element (e.g., input field name).
+        element_context: Description of what this element appears to do.
+        suggested_attacks: List of attack types the LLM suggests for this vector.
+        priority: Priority level (1=highest, 5=lowest) based on likelihood of vulnerability.
+        form_data: Associated FormData if this is a form-based vector.
+        status: Current status (pending, testing, completed, skipped).
+        tested_attacks: List of attack types already tested against this vector.
+        findings: List of vulnerabilities found on this vector.
+    """
+    id: str
+    url: str
+    endpoint: str
+    method: str
+    element_type: str
+    element_name: str
+    element_context: str
+    suggested_attacks: List[str]
+    priority: int = 3
+    form_data: Optional[FormData] = None
+    status: str = "pending"
+    tested_attacks: List[str] = field(default_factory=list)
+    findings: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert attack vector to dictionary format."""
+        return {
+            "id": self.id,
+            "url": self.url,
+            "endpoint": self.endpoint,
+            "method": self.method,
+            "element_type": self.element_type,
+            "element_name": self.element_name,
+            "element_context": self.element_context,
+            "suggested_attacks": self.suggested_attacks,
+            "priority": self.priority,
+            "status": self.status,
+            "tested_attacks": self.tested_attacks,
+            "findings": self.findings,
+        }
+
+
+class ScanPhase:
+    """Enum-like class for scan phases."""
+    INITIALIZING = "initializing"
+    DISCOVERY = "discovery"
+    ANALYSIS = "analysis"
+    ATTACK = "attack"
+    EXPLOITATION = "exploitation"
+    COMPLETE = "complete"
+
+
+@dataclass
+class ScanProgress:
+    """Tracks the overall progress of the scan.
+
+    Provides real-time visibility into what the scanner is doing
+    and how far through the process it is.
+
+    Attributes:
+        phase: Current scan phase (discovery, analysis, attack, etc.).
+        phase_progress: Progress within current phase (0-100).
+        total_endpoints_found: Number of endpoints discovered.
+        total_forms_found: Number of forms discovered.
+        total_attack_vectors: Total attack vectors identified.
+        attack_vectors_completed: Number of attack vectors fully tested.
+        attack_vectors_in_progress: Currently being tested.
+        current_vector: Description of current attack vector being tested.
+        current_attack_type: Type of attack currently being executed.
+        vulnerabilities_found: Total vulnerabilities found so far.
+        requests_sent: Total HTTP requests sent.
+        start_time: When the scan started.
+        last_update_time: When progress was last updated.
+        status_message: Human-readable status message.
+    """
+    phase: str = ScanPhase.INITIALIZING
+    phase_progress: float = 0.0
+    total_endpoints_found: int = 0
+    total_forms_found: int = 0
+    total_attack_vectors: int = 0
+    attack_vectors_completed: int = 0
+    attack_vectors_in_progress: int = 0
+    current_vector: str = ""
+    current_attack_type: str = ""
+    vulnerabilities_found: int = 0
+    requests_sent: int = 0
+    start_time: Optional[float] = None
+    last_update_time: Optional[float] = None
+    status_message: str = "Initializing..."
+
+    def get_overall_progress(self) -> float:
+        """Calculate overall scan progress percentage."""
+        phase_weights = {
+            ScanPhase.INITIALIZING: 0,
+            ScanPhase.DISCOVERY: 10,
+            ScanPhase.ANALYSIS: 20,
+            ScanPhase.ATTACK: 90,
+            ScanPhase.EXPLOITATION: 98,
+            ScanPhase.COMPLETE: 100,
+        }
+        base_progress = phase_weights.get(self.phase, 0)
+
+        if self.phase == ScanPhase.DISCOVERY:
+            # Discovery phase contributes 10%
+            return base_progress + (self.phase_progress * 0.1)
+        elif self.phase == ScanPhase.ANALYSIS:
+            # Analysis phase contributes 10% (from 10 to 20)
+            return base_progress + (self.phase_progress * 0.1)
+        elif self.phase == ScanPhase.ATTACK:
+            # Attack phase contributes 70% (from 20 to 90)
+            if self.total_attack_vectors > 0:
+                attack_progress = (
+                    self.attack_vectors_completed / self.total_attack_vectors
+                ) * 100
+                return 20 + (attack_progress * 0.7)
+            return 20
+        elif self.phase == ScanPhase.EXPLOITATION:
+            # Exploitation phase contributes 8% (from 90 to 98)
+            return base_progress + (self.phase_progress * 0.08)
+
+        return base_progress
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert progress to dictionary format."""
+        elapsed = 0
+        if self.start_time:
+            elapsed = time.time() - self.start_time
+
+        return {
+            "phase": self.phase,
+            "phase_progress": round(self.phase_progress, 1),
+            "overall_progress": round(self.get_overall_progress(), 1),
+            "total_endpoints_found": self.total_endpoints_found,
+            "total_forms_found": self.total_forms_found,
+            "total_attack_vectors": self.total_attack_vectors,
+            "attack_vectors_completed": self.attack_vectors_completed,
+            "attack_vectors_pending": (
+                self.total_attack_vectors - self.attack_vectors_completed
+            ),
+            "current_vector": self.current_vector,
+            "current_attack_type": self.current_attack_type,
+            "vulnerabilities_found": self.vulnerabilities_found,
+            "requests_sent": self.requests_sent,
+            "elapsed_seconds": round(elapsed, 1),
+            "status_message": self.status_message,
+        }
+
+    def format_status_line(self) -> str:
+        """Format a single-line status for console display."""
+        progress = self.get_overall_progress()
+        if self.phase == ScanPhase.DISCOVERY:
+            return (
+                f"[{progress:5.1f}%] 🔍 Discovery: "
+                f"Found {self.total_endpoints_found} endpoints, "
+                f"{self.total_forms_found} forms"
+            )
+        elif self.phase == ScanPhase.ANALYSIS:
+            return (
+                f"[{progress:5.1f}%] 🧠 Analysis: "
+                f"Identified {self.total_attack_vectors} attack vectors"
+            )
+        elif self.phase == ScanPhase.ATTACK:
+            return (
+                f"[{progress:5.1f}%] ⚔️  Attack: "
+                f"{self.attack_vectors_completed}/{self.total_attack_vectors} vectors | "
+                f"🎯 {self.vulnerabilities_found} vulns | "
+                f"Testing: {self.current_vector[:40]}..."
+            )
+        elif self.phase == ScanPhase.EXPLOITATION:
+            return (
+                f"[{progress:5.1f}%] 💉 Exploitation: {self.status_message}"
+            )
+        elif self.phase == ScanPhase.COMPLETE:
+            return (
+                f"[100.0%] ✅ Complete: "
+                f"Found {self.vulnerabilities_found} vulnerabilities"
+            )
+        return f"[{progress:5.1f}%] {self.status_message}"
+
+
 # =============================================================================
 # DAST SCANNER
 # =============================================================================
@@ -194,6 +389,7 @@ class DASTScanner:
         proxy: Optional[str] = None,
         model: Optional[str] = None,
         provider: Optional[str] = None,
+        progress_callback: Optional[callable] = None,
     ) -> None:
         """Initialize the DAST scanner.
 
@@ -206,12 +402,14 @@ class DASTScanner:
             model: Optional model name, can include provider prefix (e.g., "openai/gpt-4o").
             provider: Optional LLM provider override (e.g., "ollama", "openai", "openrouter").
                      If set and model has no prefix, the provider will be prepended.
+            progress_callback: Optional callback function(ScanProgress) for progress updates.
 
         Raises:
             OllamaEngineError: If the LLM provider is not available.
         """
         self.target_url = target_url.rstrip("/")
         self.max_requests = max_requests
+        self._progress_callback = progress_callback
 
         # Resolve effective model with provider prefix
         # Priority: model prefix > provider arg > env default
@@ -258,6 +456,13 @@ class DASTScanner:
         self.discovered_forms: List[FormData] = []  # Forms found during scanning
         self.discovered_params: Dict[str, List[str]] = {}  # URL params per endpoint
 
+        # NEW: Attack vector discovery and tracking
+        self.attack_vectors: List[AttackVector] = []  # All discovered attack vectors
+        self._attack_vector_id_counter: int = 0
+
+        # NEW: Scan progress tracking
+        self.progress = ScanProgress()
+
         # Exploitation state
         self.extracted_credentials: List[Dict[str, str]] = []  # Credentials from SQLi
         self.authenticated: bool = False  # Whether we've logged in
@@ -275,11 +480,53 @@ class DASTScanner:
             f"using model {self._ai_client.model}"
         )
 
+    def _update_progress(
+        self,
+        phase: Optional[str] = None,
+        status_message: Optional[str] = None,
+        **kwargs
+    ) -> None:
+        """Update scan progress and notify callback.
+
+        Args:
+            phase: New scan phase (if changing).
+            status_message: Human-readable status message.
+            **kwargs: Additional progress attributes to update.
+        """
+        if phase:
+            self.progress.phase = phase
+        if status_message:
+            self.progress.status_message = status_message
+
+        # Update any additional attributes
+        for key, value in kwargs.items():
+            if hasattr(self.progress, key):
+                setattr(self.progress, key, value)
+
+        self.progress.requests_sent = self.request_count
+        self.progress.vulnerabilities_found = len(self.vulnerabilities)
+        self.progress.last_update_time = time.time()
+
+        # Notify callback if registered
+        if self._progress_callback:
+            try:
+                self._progress_callback(self.progress)
+            except Exception as e:
+                logger.warning(f"Progress callback error: {e}")
+
+    def _generate_attack_vector_id(self) -> str:
+        """Generate a unique ID for an attack vector."""
+        self._attack_vector_id_counter += 1
+        return f"av_{self._attack_vector_id_counter:04d}"
+
     def scan(self) -> Dict[str, Any]:
         """Execute the complete DAST scanning workflow.
 
-        Performs reconnaissance, vulnerability testing, and returns
-        comprehensive scan results.
+        The scan follows these phases:
+        1. DISCOVERY: Crawl the application and find all endpoints, forms, parameters
+        2. ANALYSIS: LLM analyzes discovered elements and identifies attack vectors
+        3. ATTACK: Systematically test each attack vector with appropriate payloads
+        4. EXPLOITATION: If SQLi found, attempt to extract data
 
         Returns:
             Dictionary containing:
@@ -289,6 +536,7 @@ class DASTScanner:
                 - tested_vectors: Attack types tested
                 - target_url: Scanned URL
                 - technology_hints: Detected technology stack
+                - attack_vectors: All discovered attack vectors
 
         Example:
             >>> results = scanner.scan()
@@ -296,22 +544,53 @@ class DASTScanner:
             ...     print(f"[{vuln['severity']}] {vuln['type']}")
         """
         self.start_time = time.time()
+        self.progress.start_time = self.start_time
         logger.info(f"Starting DAST scan of {self.target_url}")
+        self._update_progress(
+            phase=ScanPhase.INITIALIZING,
+            status_message="Starting scan..."
+        )
 
         try:
-            # Phase 1: Initial Reconnaissance
-            logger.info("Phase 1: Performing reconnaissance...")
-            self._perform_reconnaissance()
+            # Phase 1: Discovery - Crawl and find all elements
+            logger.info("Phase 1: Discovery - Crawling application...")
+            self._update_progress(
+                phase=ScanPhase.DISCOVERY,
+                status_message="Crawling application to discover endpoints and forms..."
+            )
+            self._discovery_phase()
 
-            # Phase 2: Vulnerability Testing Loop
-            logger.info("Phase 2: Starting vulnerability testing...")
-            self._vulnerability_testing_loop()
+            # Phase 2: Analysis - LLM identifies attack vectors
+            logger.info("Phase 2: Analysis - Identifying attack vectors...")
+            self._update_progress(
+                phase=ScanPhase.ANALYSIS,
+                status_message="Analyzing discovered elements for attack vectors..."
+            )
+            self._analysis_phase()
 
-            # Phase 3: Exploitation (if SQLi found)
+            # Phase 3: Attack - Systematically test each vector
+            logger.info(f"Phase 3: Attack - Testing {len(self.attack_vectors)} vectors...")
+            self._update_progress(
+                phase=ScanPhase.ATTACK,
+                status_message=f"Testing {len(self.attack_vectors)} attack vectors..."
+            )
+            self._attack_phase()
+
+            # Phase 4: Exploitation (if SQLi found)
             sqli_vulns = [v for v in self.vulnerabilities if "sql" in v.type.lower()]
             if sqli_vulns:
-                logger.info("Phase 3: Exploiting SQL Injection vulnerabilities...")
+                logger.info("Phase 4: Exploiting SQL Injection vulnerabilities...")
+                self._update_progress(
+                    phase=ScanPhase.EXPLOITATION,
+                    status_message="Exploiting confirmed SQL injection..."
+                )
                 self._exploitation_phase(sqli_vulns)
+
+            # Mark complete
+            self._update_progress(
+                phase=ScanPhase.COMPLETE,
+                status_message=f"Scan complete. Found {len(self.vulnerabilities)} vulnerabilities."
+            )
 
             # Compile results
             return self.get_scan_results()
@@ -334,6 +613,14 @@ class DASTScanner:
         if self.start_time:
             elapsed_time = time.time() - self.start_time
 
+        # Count attack vector statistics
+        vectors_completed = sum(
+            1 for v in self.attack_vectors if v.status == "completed"
+        )
+        vectors_with_findings = sum(
+            1 for v in self.attack_vectors if v.findings
+        )
+
         results = {
             "target_url": self.target_url,
             "vulnerabilities": [v.to_dict() for v in self.vulnerabilities],
@@ -345,10 +632,17 @@ class DASTScanner:
                 "scan_start": datetime.fromtimestamp(
                     self.start_time
                 ).isoformat() if self.start_time else None,
+                # New attack vector statistics
+                "attack_vectors_identified": len(self.attack_vectors),
+                "attack_vectors_tested": vectors_completed,
+                "attack_vectors_vulnerable": vectors_with_findings,
+                "forms_discovered": len(self.discovered_forms),
             },
             "model_info": self._ai_client.get_model_info(),
             "tested_vectors": self.tested_vectors,
             "technology_hints": self.detected_technology,
+            "attack_vectors": [av.to_dict() for av in self.attack_vectors],
+            "progress": self.progress.to_dict(),
         }
 
         if error:
@@ -422,6 +716,661 @@ class DASTScanner:
         except HTTPClientError as e:
             logger.error(f"Reconnaissance failed: {e}")
             raise
+
+    # =========================================================================
+    # NEW PHASE METHODS
+    # =========================================================================
+
+    def _discovery_phase(self) -> None:
+        """Phase 1: Discover all endpoints, forms, and potential attack surfaces.
+
+        Crawls the application breadth-first, extracting:
+        - All reachable endpoints
+        - Forms with their input fields
+        - URL parameters
+        - Technology hints
+        """
+        # Start with initial reconnaissance
+        self._perform_reconnaissance()
+
+        # Update progress with initial findings
+        self._update_progress(
+            total_endpoints_found=len(self.tested_endpoints) + len(self.pending_endpoints),
+            total_forms_found=len(self.discovered_forms),
+            phase_progress=30.0
+        )
+
+        # Continue crawling pending endpoints (breadth-first discovery)
+        visited_in_discovery = 0
+        max_discovery_requests = min(50, self.max_requests or 50)
+
+        while self.pending_endpoints and visited_in_discovery < max_discovery_requests:
+            if self.max_requests and self.request_count >= self.max_requests:
+                break
+
+            # Get next endpoint to crawl
+            endpoint = self.pending_endpoints.pop()
+            if endpoint in self.tested_endpoints:
+                continue
+
+            try:
+                url = urljoin(self.target_url, endpoint)
+                response = self._http_client.send_request(url=url, method="GET")
+                self.request_count += 1
+                visited_in_discovery += 1
+                self.tested_endpoints.add(endpoint)
+
+                # Extract forms from this page
+                forms = self._extract_forms(response, endpoint)
+                for form in forms:
+                    if form not in self.discovered_forms:
+                        self.discovered_forms.append(form)
+
+                # Extract more endpoints
+                new_endpoints = self._extract_endpoints(response)
+                for ep in new_endpoints:
+                    if ep not in self.tested_endpoints:
+                        self.pending_endpoints.add(ep)
+
+                # Update progress
+                progress = min(
+                    100.0,
+                    (visited_in_discovery / max_discovery_requests) * 100
+                )
+                self._update_progress(
+                    total_endpoints_found=len(self.tested_endpoints) + len(self.pending_endpoints),
+                    total_forms_found=len(self.discovered_forms),
+                    phase_progress=progress,
+                    status_message=f"Crawling: {endpoint}"
+                )
+
+            except HTTPClientError as e:
+                logger.debug(f"Failed to crawl {endpoint}: {e}")
+
+        logger.info(
+            f"Discovery complete: {len(self.tested_endpoints)} endpoints visited, "
+            f"{len(self.discovered_forms)} forms found, "
+            f"{len(self.pending_endpoints)} endpoints remaining"
+        )
+
+    def _analysis_phase(self) -> None:
+        """Phase 2: Have LLM analyze discovered elements and identify attack vectors.
+
+        Sends all discovered forms, endpoints, and parameters to the LLM
+        for analysis. The LLM identifies what attacks should be tried on each element.
+        """
+        import json
+
+        # Build descriptions of discovered elements
+        forms_desc = self._format_forms_for_analysis()
+        params_desc = self._format_params_for_analysis()
+        endpoints_desc = self._format_endpoints_for_analysis()
+
+        # Ask LLM to analyze and identify attack vectors
+        prompt = format_prompt(
+            ATTACK_VECTOR_ANALYSIS_PROMPT,
+            target_url=self.target_url,
+            detected_technology=self._format_technology_hints(),
+            forms_description=forms_desc or "No forms discovered",
+            url_params_description=params_desc or "No URL parameters discovered",
+            endpoints_description=endpoints_desc or "No additional endpoints discovered"
+        )
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            self._update_progress(
+                phase_progress=20.0,
+                status_message="LLM analyzing discovered elements..."
+            )
+
+            response = self._ai_client.chat_with_retry(messages)
+
+            # Parse the JSON response
+            attack_vectors = self._parse_attack_vector_analysis(response)
+
+            # Sort by priority (lower = higher priority)
+            attack_vectors.sort(key=lambda x: x.priority)
+
+            self.attack_vectors = attack_vectors
+            self.progress.total_attack_vectors = len(attack_vectors)
+
+            self._update_progress(
+                phase_progress=100.0,
+                status_message=f"Identified {len(attack_vectors)} attack vectors"
+            )
+
+            logger.info(
+                f"Analysis complete: {len(attack_vectors)} attack vectors identified"
+            )
+
+            # Log summary of attack vectors
+            for av in attack_vectors[:5]:  # Log top 5
+                logger.info(
+                    f"  [{av.priority}] {av.element_type}:{av.element_name} -> "
+                    f"{', '.join(av.suggested_attacks[:2])}"
+                )
+            if len(attack_vectors) > 5:
+                logger.info(f"  ... and {len(attack_vectors) - 5} more")
+
+        except OllamaEngineError as e:
+            logger.error(f"Attack vector analysis failed: {e}")
+            # Fall back to creating attack vectors from discovered forms
+            self._create_fallback_attack_vectors()
+
+    def _attack_phase(self) -> None:
+        """Phase 3: Systematically attack each discovered vector.
+
+        Works through the attack vector queue in priority order.
+        For each vector, runs the suggested attacks until either:
+        - A vulnerability is confirmed
+        - All suggested attacks have been tested
+        - Request limit is reached
+        """
+        total_vectors = len(self.attack_vectors)
+        if total_vectors == 0:
+            logger.warning("No attack vectors to test")
+            return
+
+        for idx, vector in enumerate(self.attack_vectors):
+            # Check limits
+            if self.max_requests and self.request_count >= self.max_requests:
+                logger.info(f"Request limit reached during attack phase")
+                vector.status = "skipped"
+                continue
+
+            # Update progress
+            self.progress.attack_vectors_in_progress = 1
+            self._update_progress(
+                current_vector=f"{vector.element_type}:{vector.element_name}",
+                status_message=f"Testing vector {idx+1}/{total_vectors}: {vector.element_name}"
+            )
+
+            vector.status = "testing"
+            vector_found_vuln = False
+
+            # Test each suggested attack type
+            for attack_type in vector.suggested_attacks:
+                if vector_found_vuln:
+                    # Found a vuln, move to next vector
+                    break
+
+                if self.max_requests and self.request_count >= self.max_requests:
+                    break
+
+                self._update_progress(
+                    current_attack_type=attack_type,
+                    status_message=f"Testing {attack_type} on {vector.element_name}"
+                )
+
+                try:
+                    # Execute attack against this vector
+                    found = self._execute_smart_attack(vector, attack_type)
+
+                    vector.tested_attacks.append(attack_type)
+
+                    if found:
+                        vector_found_vuln = True
+                        vector.findings.append(attack_type)
+                        # Mark confirmed so other vectors can skip redundant testing
+                        self._confirmed_vulns.add((attack_type, vector.url))
+
+                except Exception as e:
+                    logger.error(f"Error testing {attack_type} on {vector.element_name}: {e}")
+
+            # Mark vector complete
+            vector.status = "completed"
+            self.progress.attack_vectors_completed = idx + 1
+            self.progress.attack_vectors_in_progress = 0
+            self._update_progress()
+
+            logger.info(
+                f"Vector {idx+1}/{total_vectors} complete: {vector.element_name} "
+                f"({'VULNERABLE' if vector_found_vuln else 'clean'})"
+            )
+
+    def _execute_smart_attack(
+        self,
+        vector: AttackVector,
+        attack_type: str
+    ) -> bool:
+        """Execute a specific attack type against an attack vector.
+
+        Uses LLM to generate targeted payloads for this specific
+        vector and attack combination.
+
+        Args:
+            vector: The attack vector to test.
+            attack_type: Type of attack to execute.
+
+        Returns:
+            True if vulnerability was found, False otherwise.
+        """
+        import json
+
+        # Get form fields if this is a form-based vector
+        form_fields_str = ""
+        if vector.form_data:
+            form_fields_str = "\n".join(
+                f"  - {name}: {value or '(empty)'}"
+                for name, value in vector.form_data.inputs.items()
+            )
+
+        # Ask LLM for targeted payloads
+        prompt = format_prompt(
+            SMART_ATTACK_PROMPT,
+            url=vector.url,
+            element_type=vector.element_type,
+            element_name=vector.element_name,
+            method=vector.method,
+            element_context=vector.element_context,
+            detected_technology=self._format_technology_hints(),
+            attack_type=attack_type,
+            form_fields=form_fields_str or "N/A (URL parameter attack)"
+        )
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = self._ai_client.chat_with_retry(messages)
+            attack_plan = self._parse_smart_attack_response(response)
+
+            payloads = attack_plan.get("payloads", [])
+            if not payloads:
+                logger.warning(f"No payloads generated for {attack_type}")
+                return False
+
+            # Execute each payload
+            for payload_info in payloads:
+                if self.max_requests and self.request_count >= self.max_requests:
+                    break
+
+                payload = payload_info.get("payload", "")
+                inject_field = payload_info.get("inject_field", vector.element_name)
+
+                if not payload:
+                    continue
+
+                # Execute the payload
+                if vector.form_data:
+                    # Form-based attack
+                    finding = self._execute_form_payload(
+                        vector, attack_type, payload, inject_field
+                    )
+                else:
+                    # URL parameter attack
+                    finding = self._execute_url_payload(
+                        vector, attack_type, payload
+                    )
+
+                if finding:
+                    return True
+
+            return False
+
+        except OllamaEngineError as e:
+            logger.error(f"Smart attack planning failed: {e}")
+            # Fall back to generic payloads
+            return self._execute_generic_attack(vector, attack_type)
+
+    def _execute_form_payload(
+        self,
+        vector: AttackVector,
+        attack_type: str,
+        payload: str,
+        inject_field: str
+    ) -> bool:
+        """Execute a payload against a form-based attack vector.
+
+        Args:
+            vector: Attack vector with form data.
+            attack_type: Type of attack being tested.
+            payload: The payload to inject.
+            inject_field: Which form field to inject into.
+
+        Returns:
+            True if vulnerability indicator found.
+        """
+        if not vector.form_data:
+            return False
+
+        form = vector.form_data
+        form_url = urljoin(self.target_url, form.action)
+
+        # Build form data with payload
+        form_data = {}
+        for field_name, default_value in form.inputs.items():
+            if field_name == inject_field or inject_field not in form.inputs:
+                form_data[field_name] = payload
+            else:
+                form_data[field_name] = default_value or "test"
+
+        try:
+            if form.method.upper() == "POST":
+                response = self._http_client.send_request(
+                    url=form_url,
+                    method="POST",
+                    body=form_data,
+                    form_data=True
+                )
+            else:
+                # GET with query params
+                from urllib.parse import urlencode
+                query_string = urlencode(form_data)
+                get_url = f"{form_url}?{query_string}"
+                response = self._http_client.send_request(url=get_url, method="GET")
+
+            self.request_count += 1
+
+            # Track tested
+            self.tested_endpoints.add(form.action)
+            if attack_type not in self.tested_vectors:
+                self.tested_vectors[attack_type] = []
+            self.tested_vectors[attack_type].append(f"{inject_field}={payload[:30]}")
+
+            # Analyze response
+            context = (
+                f"Testing {attack_type} on form field '{inject_field}' "
+                f"at {form.action} with payload: {payload[:100]}"
+            )
+            analysis = self._analyze_response(response, context=context)
+
+            # Check for vulnerability
+            finding = self._check_for_vulnerability(analysis)
+
+            if finding:
+                # Record vulnerability
+                vuln = self._extract_vulnerability_from_analysis(
+                    analysis, response, form_url, form.method, f"{inject_field}={payload}"
+                )
+                if vuln:
+                    self.vulnerabilities.append(vuln)
+                    logger.warning(
+                        f"🎯 VULNERABILITY FOUND: {attack_type} in {inject_field}"
+                    )
+                return True
+
+            return False
+
+        except HTTPClientError as e:
+            logger.debug(f"Form payload test failed: {e}")
+            return False
+
+    def _execute_url_payload(
+        self,
+        vector: AttackVector,
+        attack_type: str,
+        payload: str
+    ) -> bool:
+        """Execute a payload against a URL parameter attack vector.
+
+        Args:
+            vector: Attack vector (URL-based).
+            attack_type: Type of attack being tested.
+            payload: The payload to inject.
+
+        Returns:
+            True if vulnerability indicator found.
+        """
+        try:
+            # Build test URL
+            base_url = vector.url
+            if "?" in base_url:
+                test_url = f"{base_url}&{vector.element_name}={payload}"
+            else:
+                test_url = f"{base_url}?{vector.element_name}={payload}"
+
+            response = self._http_client.send_request(url=test_url, method="GET")
+            self.request_count += 1
+
+            # Track tested
+            self.tested_endpoints.add(vector.endpoint)
+            if attack_type not in self.tested_vectors:
+                self.tested_vectors[attack_type] = []
+            self.tested_vectors[attack_type].append(payload[:50])
+
+            # Analyze
+            context = (
+                f"Testing {attack_type} on URL parameter '{vector.element_name}' "
+                f"with payload: {payload[:100]}"
+            )
+            analysis = self._analyze_response(response, context=context)
+
+            finding = self._check_for_vulnerability(analysis)
+
+            if finding:
+                vuln = self._extract_vulnerability_from_analysis(
+                    analysis, response, test_url, "GET", payload
+                )
+                if vuln:
+                    self.vulnerabilities.append(vuln)
+                    logger.warning(
+                        f"🎯 VULNERABILITY FOUND: {attack_type} in URL param {vector.element_name}"
+                    )
+                return True
+
+            return False
+
+        except HTTPClientError as e:
+            logger.debug(f"URL payload test failed: {e}")
+            return False
+
+    def _execute_generic_attack(
+        self,
+        vector: AttackVector,
+        attack_type: str
+    ) -> bool:
+        """Fallback: Execute generic payloads when LLM fails.
+
+        Args:
+            vector: Attack vector to test.
+            attack_type: Type of attack.
+
+        Returns:
+            True if vulnerability found.
+        """
+        # Generate payloads using existing method
+        payloads = self._generate_payloads(attack_type)
+
+        if not payloads:
+            return False
+
+        for payload_info in payloads[:3]:  # Limit to 3 generic payloads
+            if self.max_requests and self.request_count >= self.max_requests:
+                break
+
+            payload = payload_info.get("payload", "")
+            if not payload:
+                continue
+
+            if vector.form_data:
+                finding = self._execute_form_payload(
+                    vector, attack_type, payload, vector.element_name
+                )
+            else:
+                finding = self._execute_url_payload(
+                    vector, attack_type, payload
+                )
+
+            if finding:
+                return True
+
+        return False
+
+    # =========================================================================
+    # HELPER METHODS FOR NEW PHASES
+    # =========================================================================
+
+    def _format_forms_for_analysis(self) -> str:
+        """Format discovered forms for LLM analysis."""
+        if not self.discovered_forms:
+            return ""
+
+        lines = []
+        for i, form in enumerate(self.discovered_forms, 1):
+            fields = ", ".join(
+                f"{name}={value or '(empty)'}"
+                for name, value in form.inputs.items()
+            )
+            lines.append(
+                f"{i}. Form at {form.action} (method={form.method})\n"
+                f"   Fields: {fields}\n"
+                f"   Found on: {form.endpoint}"
+            )
+        return "\n".join(lines)
+
+    def _format_params_for_analysis(self) -> str:
+        """Format discovered URL parameters for LLM analysis."""
+        if not self.discovered_params:
+            return ""
+
+        lines = []
+        for endpoint, params in self.discovered_params.items():
+            lines.append(f"- {endpoint}: {', '.join(params)}")
+        return "\n".join(lines)
+
+    def _format_endpoints_for_analysis(self) -> str:
+        """Format discovered endpoints for LLM analysis."""
+        endpoints = list(self.tested_endpoints) + list(self.pending_endpoints)
+        if not endpoints:
+            return ""
+
+        # Group by type/pattern
+        return "\n".join(f"- {ep}" for ep in sorted(endpoints)[:30])
+
+    def _parse_attack_vector_analysis(self, response: str) -> List[AttackVector]:
+        """Parse LLM response into AttackVector objects.
+
+        Args:
+            response: LLM response (expected to contain JSON).
+
+        Returns:
+            List of AttackVector objects.
+        """
+        import json
+
+        vectors = []
+
+        # Try to extract JSON from response
+        json_match = re.search(r'\[[\s\S]*\]', response)
+        if not json_match:
+            logger.warning("No JSON array found in attack vector analysis")
+            return self._create_fallback_attack_vectors()
+
+        try:
+            data = json.loads(json_match.group())
+
+            for item in data:
+                # Find associated form if this is form-based
+                form_data = None
+                if item.get("element_type") == "form":
+                    for form in self.discovered_forms:
+                        if (form.action == item.get("url") or
+                            item.get("element_name") in form.inputs):
+                            form_data = form
+                            break
+
+                vector = AttackVector(
+                    id=self._generate_attack_vector_id(),
+                    url=item.get("url", self.target_url),
+                    endpoint=item.get("url", "/").split("?")[0],
+                    method=item.get("method", "GET"),
+                    element_type=item.get("element_type", "unknown"),
+                    element_name=item.get("element_name", "unknown"),
+                    element_context=item.get("context", ""),
+                    suggested_attacks=item.get("suggested_attacks", []),
+                    priority=item.get("priority", 3),
+                    form_data=form_data,
+                )
+                vectors.append(vector)
+
+            return vectors
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse attack vector JSON: {e}")
+            return self._create_fallback_attack_vectors()
+
+    def _create_fallback_attack_vectors(self) -> List[AttackVector]:
+        """Create attack vectors from discovered forms when LLM analysis fails."""
+        vectors = []
+
+        # Create vectors for each form field
+        for form in self.discovered_forms:
+            for field_name in form.inputs.keys():
+                # Skip obvious non-injectable fields
+                if field_name.lower() in ("submit", "button", "csrf", "token"):
+                    continue
+
+                # Determine likely attacks based on field name
+                suggested = []
+                name_lower = field_name.lower()
+
+                if any(x in name_lower for x in ("user", "name", "login", "email")):
+                    suggested = ["SQL Injection", "XSS", "Authentication Bypass"]
+                elif any(x in name_lower for x in ("pass", "pwd", "secret")):
+                    suggested = ["SQL Injection", "Authentication Bypass"]
+                elif any(x in name_lower for x in ("search", "query", "q", "s")):
+                    suggested = ["SQL Injection", "XSS", "Command Injection"]
+                elif any(x in name_lower for x in ("id", "num", "no")):
+                    suggested = ["SQL Injection", "Broken Access Control"]
+                elif any(x in name_lower for x in ("file", "path", "dir")):
+                    suggested = ["Path Traversal", "Command Injection"]
+                elif any(x in name_lower for x in ("url", "link", "redirect")):
+                    suggested = ["SSRF", "Open Redirect"]
+                else:
+                    suggested = ["XSS", "SQL Injection"]
+
+                vector = AttackVector(
+                    id=self._generate_attack_vector_id(),
+                    url=urljoin(self.target_url, form.action),
+                    endpoint=form.action,
+                    method=form.method,
+                    element_type="form_field",
+                    element_name=field_name,
+                    element_context=f"Form field in {form.action}",
+                    suggested_attacks=suggested,
+                    priority=1 if "login" in form.action.lower() else 2,
+                    form_data=form,
+                )
+                vectors.append(vector)
+
+        logger.info(f"Created {len(vectors)} fallback attack vectors")
+        return vectors
+
+    def _parse_smart_attack_response(self, response: str) -> Dict[str, Any]:
+        """Parse LLM smart attack response.
+
+        Args:
+            response: LLM response with attack plan.
+
+        Returns:
+            Dictionary with payloads and attack completion criteria.
+        """
+        import json
+
+        # Try to extract JSON
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # Fall back to parsing payload lines
+        payloads = []
+        for line in response.split("\n"):
+            if "payload" in line.lower() and ":" in line:
+                payload = line.split(":", 1)[1].strip().strip('"\'')
+                if payload:
+                    payloads.append({"payload": payload, "inject_field": ""})
+
+        return {"payloads": payloads}
 
     def _vulnerability_testing_loop(self) -> None:
         """Execute the main vulnerability testing loop.

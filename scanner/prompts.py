@@ -271,6 +271,113 @@ ${last_response}
 
 
 # =============================================================================
+# ATTACK VECTOR ANALYSIS PROMPT
+# =============================================================================
+
+ATTACK_VECTOR_ANALYSIS_PROMPT = """Analyze the following discovered elements and determine what security tests should be performed.
+
+## Target Application:
+- **Base URL**: ${target_url}
+- **Detected Technology**: ${detected_technology}
+
+## Discovered Elements to Analyze:
+
+### Forms Found:
+${forms_description}
+
+### URL Parameters Found:
+${url_params_description}
+
+### Endpoints Discovered:
+${endpoints_description}
+
+## Your Task:
+For EACH element above, determine:
+1. What vulnerability types could affect this element
+2. Priority (1-5, where 1 is highest priority / most likely vulnerable)
+3. Brief reasoning for your assessment
+
+Focus on these vulnerability categories:
+- SQL Injection (login forms, search, ID parameters)
+- XSS (any reflected input, search boxes, comments)
+- Command Injection (file operations, system-like parameters)
+- Path Traversal (file parameters, download endpoints)
+- SSTI (template-rendering endpoints)
+- Authentication Bypass (login forms, session handling)
+- Broken Access Control (ID-based resources)
+- SSRF (URL parameters, webhooks)
+
+## Output Format (JSON):
+Respond with a JSON array where each element is:
+```json
+[
+  {
+    "element_type": "form|url_param|endpoint",
+    "element_name": "name of form/param/endpoint",
+    "url": "full URL",
+    "method": "GET|POST",
+    "context": "What this element appears to do",
+    "suggested_attacks": ["SQL Injection", "XSS"],
+    "priority": 1,
+    "reasoning": "Why these attacks are relevant"
+  }
+]
+```
+
+Be thorough - identify ALL potential attack vectors. Prioritize elements that:
+- Accept user input directly
+- Involve authentication
+- Handle IDs or database lookups
+- Process file paths or URLs
+- Display user-controlled content"""
+
+
+# =============================================================================
+# SMART ATTACK SELECTION PROMPT
+# =============================================================================
+
+SMART_ATTACK_PROMPT = """You are testing a specific element for vulnerabilities. Analyze the context and generate the most effective attack payloads.
+
+## Attack Vector Details:
+- **URL**: ${url}
+- **Element Type**: ${element_type}
+- **Element Name**: ${element_name}
+- **HTTP Method**: ${method}
+- **Context**: ${element_context}
+- **Technology Stack**: ${detected_technology}
+
+## Attack Type to Test:
+${attack_type}
+
+## Form Fields (if applicable):
+${form_fields}
+
+## Your Task:
+Generate 3-5 highly targeted payloads for this specific attack type against this specific element.
+Consider:
+1. The element's apparent purpose (e.g., login = likely DB queries)
+2. The detected technology (MySQL vs PostgreSQL, PHP vs Python)
+3. Any WAF/filter bypass techniques that might be needed
+
+## Output Format (JSON):
+```json
+{
+  "payloads": [
+    {
+      "payload": "the actual payload string",
+      "purpose": "what this payload tests for",
+      "inject_field": "which field to inject into",
+      "expected_indicator": "what response indicates success"
+    }
+  ],
+  "attack_complete_after": "Description of when to stop testing this attack type - e.g., 'after finding one confirmed SQLi' or 'after testing all payloads'"
+}
+```
+
+Generate payloads that are SPECIFIC to this context, not generic."""
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
