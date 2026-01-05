@@ -48,6 +48,25 @@ Reports are saved to `reports/`.
 - **Detailed Reports** – Markdown reports with evidence and remediation steps
 - **Smart Reconnaissance** – Auto-discovers endpoints, forms, and attack surfaces
 
+## CLI Options
+
+```
+python main.py --help
+
+--target, -t URL       Target URL to scan (required)
+--provider, -p NAME    LLM provider: ollama, openai, openrouter
+--model, -m NAME       Model name (e.g., qwen3, gpt-4o)
+--output, -o DIR       Output directory for reports (default: reports/)
+--verbose, -v          Enable debug logging
+--quiet, -q            Minimal output
+--no-verify-ssl        Disable SSL verification
+--timeout SEC          HTTP timeout in seconds (default: 30)
+--max-requests N       Limit total requests
+--proxy URL            HTTP proxy for requests
+```
+
+---
+
 ## Vulnerable Application Endpoints
 
 The custom vulnerable application provides the following endpoints for testing:
