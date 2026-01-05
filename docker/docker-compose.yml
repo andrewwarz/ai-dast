@@ -1,0 +1,38 @@
+# AI DAST Scanner - Custom Vulnerable Web Application
+# Docker Compose configuration for the intentionally vulnerable Flask app
+#
+# Usage:
+#   docker-compose up -d      # Start container (builds if needed)
+#   docker-compose up --build # Force rebuild and start
+#   docker-compose down       # Stop container
+#   docker-compose down -v    # Stop and remove volumes (full reset)
+
+services:
+  vulnerable-app:
+    build:
+      context: ../vulnerable-app
+      dockerfile: Dockerfile
+    container_name: vulnerable-app
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      # Persist SQLite database across container restarts
+      - ./data:/app/data
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-0}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - vulnerable-app-network
+
+networks:
+  vulnerable-app-network:
+    name: vulnerable-app-network
+    driver: bridge
+

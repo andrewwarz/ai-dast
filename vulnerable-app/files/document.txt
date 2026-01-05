@@ -1,0 +1,10 @@
+This is a sample document file.
+
+Welcome to the vulnerable application file storage.
+This file contains some example content that can be read via the file API.
+
+Some confidential information:
+- API Key: sk_test_1234567890abcdef
+- Database: vulnerable.db
+- Admin email: admin@example.com
+
