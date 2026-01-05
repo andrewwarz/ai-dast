@@ -318,7 +318,12 @@ class ScanProgress:
     def format_status_line(self) -> str:
         """Format a single-line status for console display."""
         progress = self.get_overall_progress()
-        if self.phase == ScanPhase.DISCOVERY:
+        if self.phase == ScanPhase.INITIALIZING:
+            return f"[{progress:5.1f}%] 🚀 Initializing scan..."
+        elif self.phase == ScanPhase.DISCOVERY:
+            # Show status message during initial discovery, then show counts
+            if self.total_endpoints_found == 0 and self.total_forms_found == 0:
+                return f"[{progress:5.1f}%] 🔍 Discovery: {self.status_message}"
             return (
                 f"[{progress:5.1f}%] 🔍 Discovery: "
                 f"Found {self.total_endpoints_found} endpoints, "
@@ -1085,15 +1090,18 @@ class DASTScanner:
             finding = self._check_for_vulnerability(analysis)
 
             if finding:
-                # Record vulnerability
-                vuln = self._extract_vulnerability_from_analysis(
-                    analysis, response, form_url, form.method, f"{inject_field}={payload}"
+                # Record vulnerability using existing method
+                self._parse_and_record_vulnerability(
+                    analysis=analysis,
+                    vuln_type=attack_type,
+                    url=form_url,
+                    method=form.method,
+                    payload=f"{inject_field}={payload}",
+                    response=response
                 )
-                if vuln:
-                    self.vulnerabilities.append(vuln)
-                    logger.warning(
-                        f"🎯 VULNERABILITY FOUND: {attack_type} in {inject_field}"
-                    )
+                logger.warning(
+                    f"🎯 VULNERABILITY FOUND: {attack_type} in {inject_field}"
+                )
                 return True
 
             return False
@@ -1145,14 +1153,18 @@ class DASTScanner:
             finding = self._check_for_vulnerability(analysis)
 
             if finding:
-                vuln = self._extract_vulnerability_from_analysis(
-                    analysis, response, test_url, "GET", payload
+                # Record vulnerability using existing method
+                self._parse_and_record_vulnerability(
+                    analysis=analysis,
+                    vuln_type=attack_type,
+                    url=test_url,
+                    method="GET",
+                    payload=payload,
+                    response=response
                 )
-                if vuln:
-                    self.vulnerabilities.append(vuln)
-                    logger.warning(
-                        f"🎯 VULNERABILITY FOUND: {attack_type} in URL param {vector.element_name}"
-                    )
+                logger.warning(
+                    f"🎯 VULNERABILITY FOUND: {attack_type} in URL param {vector.element_name}"
+                )
                 return True
 
             return False
