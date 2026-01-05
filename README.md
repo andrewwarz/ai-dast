@@ -357,7 +357,9 @@ pytest tests/ --cov=scanner --cov-report=xml --cov-report=html
 
 ## License
 
-MIT License - See LICENSE file for details
+© 2026 Andrew Warz. All Rights Reserved.
+
+This code is provided for viewing and educational purposes only. No permission is granted to use, copy, modify, distribute, or sell this software without explicit written consent from the author.
 
 ## Contributing
 
