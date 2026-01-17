@@ -21,10 +21,10 @@ pip install -r requirements.txt
 ```bash
 brew install ollama        # macOS
 ollama serve &             # Start Ollama
-ollama pull qwen3          # Download a model
+ollama pull gemma3         # Download a model (recommended)
 ```
 
-### 2.5. Setup Katana (Endpoint Discovery)
+### 3. Setup Katana (Endpoint Discovery)
 
 Katana is a fast crawler with headless browser support for comprehensive endpoint discovery.
 
@@ -39,20 +39,25 @@ go install github.com/projectdiscovery/katana/cmd/katana@latest
 katana -version
 ```
 
-> **Note:** Katana is optional but recommended for better endpoint discovery. The scanner will fall back to manual crawling if not installed.
+> **Note:** Katana is optional but highly recommended for modern SPAs like Juice Shop. The scanner will fall back to manual crawling if not installed.
 
 For more information: https://github.com/projectdiscovery/katana
 
-### 3. Run Test Target
+### 4. Run Test Target (OWASP Juice Shop)
 
+```bash
+docker run -d -p 3000:3000 bkimminich/juice-shop
+```
+
+Or use the included docker-compose:
 ```bash
 cd docker && docker-compose up -d && cd ..
 ```
 
-### 4. Scan!
+### 5. Scan!
 
 ```bash
-python main.py --target http://localhost:8080
+python main.py --target http://localhost:3000
 ```
 
 Reports are saved to `reports/`.
@@ -86,39 +91,49 @@ python main.py --help
 
 ---
 
-## Vulnerable Application Endpoints
+## Test Target: OWASP Juice Shop
 
-The custom vulnerable application provides the following endpoints for testing:
+This scanner is designed to work with [OWASP Juice Shop](https://owasp.org/www-project-juice-shop/), a modern intentionally vulnerable web application.
 
-| Endpoint | Vulnerability Type | Method | Example |
-|----------|-------------------|--------|---------|
-| `/api/users?id=1` | SQL Injection | GET | `curl http://localhost:8080/api/users?id=1` |
-| `/api/products?search=laptop` | SQL Injection | GET | `curl http://localhost:8080/api/products?search=laptop` |
-| `/login` | SQL Injection | POST | Form-based authentication bypass |
-| `/search?q=test` | XSS (Reflected) | GET | `curl http://localhost:8080/search?q=test` |
-| `/comment` | XSS (Stored) | POST | Submit and display comments |
-| `/profile?name=user` | XSS (DOM-based) | GET | `curl http://localhost:8080/profile?name=user` |
-| `/ping?host=127.0.0.1` | Command Injection | GET | `curl http://localhost:8080/ping?host=127.0.0.1` |
-| `/system?cmd=ls` | Command Injection | GET | `curl http://localhost:8080/system?cmd=ls` |
-| `/files?path=readme.txt` | Path Traversal | GET | `curl http://localhost:8080/files?path=readme.txt` |
-| `/fetch?url=http://example.com` | SSRF | GET | `curl http://localhost:8080/fetch?url=http://example.com` |
-| `/template?name=user` | SSTI | GET | `curl http://localhost:8080/template?name=user` |
-| `/deserialize` | Insecure Deserialization | POST | Base64-encoded pickle data |
-| `/xml` | XXE | POST | XML document with external entities |
-| `/health` | Health Check | GET | `curl http://localhost:8080/health` |
+### Why Juice Shop?
 
-All endpoints are intentionally vulnerable for security testing purposes.
+- **Modern Architecture**: Single-page application (Angular) with REST APIs
+- **Real-world Vulnerabilities**: 100+ challenges covering OWASP Top 10
+- **Active Development**: Continuously updated with new vulnerabilities
+- **Industry Standard**: Widely used for security training and tool testing
+
+### Key Endpoints Discovered by Scanner
+
+| Endpoint | Vulnerability Type | Description |
+|----------|-------------------|-------------|
+| `/rest/user/login` | SQL Injection, Auth Bypass | User authentication endpoint |
+| `/rest/products/search` | SQL Injection | Product search with injectable query |
+| `/api/Users` | Broken Access Control | User data exposure |
+| `/api/Products` | Information Disclosure | Product listing with sensitive data |
+| `/rest/saveLoginIp` | Security Misconfiguration | IP logging endpoint |
+| `/redirect` | Open Redirect | URL redirection vulnerability |
+| `/api/Feedbacks` | XSS, Injection | User feedback submission |
+| `/file-upload` | Arbitrary File Upload | File upload vulnerability |
+
+> **Note**: Juice Shop contains 100+ vulnerabilities. The scanner uses Katana to discover endpoints dynamically.
 
 ## Project Structure
 
 ```
 ai-dast/
-├── scanner/          # Core application modules
-├── tests/            # Test suite
-├── docker/           # Vulnerable app Docker configuration
-├── main.py           # CLI entry point (future phase)
-├── requirements.txt  # Python dependencies
-└── README.md         # This file
+├── scanner/              # Core scanner modules
+│   ├── scanner.py        # Main scanning engine
+│   ├── ai_engine.py      # LLM integration (LiteLLM)
+│   ├── http_client.py    # HTTP request handling
+│   ├── katana_client.py  # Katana crawler integration
+│   ├── report_generator.py # Markdown report generation
+│   ├── prompts.py        # AI prompts for vulnerability detection
+│   └── config.py         # Configuration management
+├── tests/                # Test suite
+├── docker/               # Docker configuration
+├── main.py               # CLI entry point
+├── requirements.txt      # Python dependencies
+└── README.md             # This file
 ```
 
 ## Configuration
@@ -129,8 +144,8 @@ Create a `.env` file in the project root (optional):
 
 ```env
 LLM_PROVIDER=ollama
-OLLAMA_MODEL=llama3
-TARGET_URL=http://localhost:8080
+OLLAMA_MODEL=gemma3
+TARGET_URL=http://localhost:3000
 ```
 
 ### LLM Provider Configuration (LiteLLM)
@@ -162,10 +177,10 @@ Ollama runs locally and is free to use. Best for privacy-conscious deployments.
    ```
 4. **Run the scanner**:
    ```bash
-   python main.py --target http://localhost:8080
+   python main.py --target http://localhost:3000
    ```
 
-**Model name format**: `ollama/llama3` or just `llama3`
+**Model name format**: `ollama/gemma3` or just `gemma3`
 
 **Recommended models for security analysis**:
 - `qwen3` - Strong reasoning capabilities (recommended)
@@ -186,7 +201,7 @@ OpenRouter provides access to many models through a single API. Requires an API 
    ```
 3. **Run the scanner**:
    ```bash
-   python main.py --target http://localhost:8080
+   python main.py --target http://localhost:3000
    ```
 
 **Model name format**: `openrouter/anthropic/claude-3.5-sonnet` or `anthropic/claude-3.5-sonnet`
@@ -209,7 +224,7 @@ Direct OpenAI API access. Requires an OpenAI API key.
    ```
 3. **Run the scanner**:
    ```bash
-   python main.py --target http://localhost:8080
+   python main.py --target http://localhost:3000
    ```
 
 **Model name format**: `openai/gpt-4o` or just `gpt-4o`
@@ -223,13 +238,13 @@ OPENAI_BASE_URL=https://your-resource.openai.azure.com/
 
 ```bash
 # Using Ollama (default, local)
-LLM_PROVIDER=ollama OLLAMA_MODEL=llama3 python main.py --target http://localhost:8080
+LLM_PROVIDER=ollama OLLAMA_MODEL=gemma3 python main.py --target http://localhost:3000
 
 # Using OpenRouter with Claude
-LLM_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-v1-xxx OPENROUTER_MODEL=anthropic/claude-3.5-sonnet python main.py --target http://localhost:8080
+LLM_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-v1-xxx OPENROUTER_MODEL=anthropic/claude-3.5-sonnet python main.py --target http://localhost:3000
 
 # Using OpenAI GPT-4o
-LLM_PROVIDER=openai OPENAI_API_KEY=sk-xxx OPENAI_MODEL=gpt-4o python main.py --target http://localhost:8080
+LLM_PROVIDER=openai OPENAI_API_KEY=sk-xxx OPENAI_MODEL=gpt-4o python main.py --target http://localhost:3000
 ```
 
 ### Target URL Specification
@@ -260,18 +275,18 @@ After starting the vulnerable application, verify the setup:
 
 2. **HTTP Connectivity:**
    ```bash
-   curl -I http://localhost:8080
+   curl -I http://localhost:3000
    # Should return HTTP/1.1 200 OK
    ```
 
 3. **Application Verification:**
-   - Visit http://localhost:8080 and verify the home page lists all vulnerability endpoints
-   - Test a sample endpoint: `curl http://localhost:8080/api/users?id=1`
-   - Verify health endpoint: `curl http://localhost:8080/health`
+   - Visit http://localhost:3000 in your browser
+   - Verify Juice Shop loads with the product catalog
+   - Test the REST API: `curl http://localhost:3000/rest/products/search?q=apple`
 
-4. **Scanner Integration Test (after CLI is implemented):**
+4. **Scanner Integration Test:**
    ```bash
-   python main.py --target http://localhost:8080 --model llama3
+   python main.py --target http://localhost:3000 --model gemma3
    ```
 
 ## Testing
@@ -282,17 +297,18 @@ Integration tests require external services to be running:
 
 | Service | Default Port | Purpose |
 |---------|--------------|---------|
-| Vulnerable App | `localhost:8080` | Custom vulnerable Flask application demonstrating OWASP Top 10 |
+| Juice Shop | `localhost:3000` | OWASP Juice Shop - intentionally vulnerable web application |
 | Ollama | `localhost:11434` | AI model API for vulnerability analysis |
 
-**Starting the Vulnerable Application:**
+**Starting Juice Shop:**
 ```bash
-cd docker && docker-compose up -d
+docker run -d -p 3000:3000 bkimminich/juice-shop
+# Or: cd docker && docker-compose up -d
 ```
 
 **Verifying Ollama:**
 ```bash
-ollama list  # Ensure at least one model is available
+ollama list  # Ensure at least one model is available (gemma3 recommended)
 ```
 
 ### Test Markers
@@ -301,8 +317,8 @@ The test suite uses pytest markers to categorize tests:
 
 | Marker | Description |
 |--------|-------------|
-| `integration` | Tests requiring external services (vulnerable app and/or Ollama) |
-| `requires_target` | Tests specifically requiring the vulnerable application on localhost:8080 |
+| `integration` | Tests requiring external services (Juice Shop and/or Ollama) |
+| `requires_target` | Tests specifically requiring Juice Shop on localhost:3000 |
 | `requires_ollama` | Tests specifically requiring Ollama on localhost:11434 |
 | `requires_katana` | Tests specifically requiring Katana to be installed |
 | `slow` | Slow-running tests (full scans, performance tests) |
