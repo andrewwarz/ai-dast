@@ -4,10 +4,12 @@ This module provides shared fixtures for testing the AI DAST Scanner components:
 - Mock fixtures for Ollama client and HTTP responses
 - Sample data fixtures for scan results and vulnerabilities
 - Integration test fixtures for target application connectivity
+- Katana-specific fixtures for endpoint discovery testing
 """
 
+import shutil
 import socket
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -33,6 +35,9 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "requires_ollama: mark test as requiring Ollama to be running"
+    )
+    config.addinivalue_line(
+        "markers", "requires_katana: mark test as requiring Katana to be installed"
     )
 
 
@@ -456,3 +461,122 @@ STOP
 
 Testing can be safely concluded. Recommend generating the final report.
 """
+
+
+# =============================================================================
+# KATANA FIXTURES
+# =============================================================================
+
+def is_katana_available() -> bool:
+    """Check if Katana is installed and available in PATH.
+
+    Returns:
+        True if katana is found, False otherwise.
+    """
+    return shutil.which("katana") is not None
+
+
+@pytest.fixture
+def katana_available():
+    """Skip test if Katana is not installed.
+
+    Returns:
+        True if Katana is available.
+
+    Raises:
+        pytest.skip: If Katana is not found in PATH.
+    """
+    if not is_katana_available():
+        pytest.skip("Katana is not installed or not in PATH")
+    return True
+
+
+@pytest.fixture
+def mock_katana_output():
+    """Provide sample Katana output with multiple endpoints.
+
+    Returns:
+        String containing sample Katana output with various URL patterns.
+    """
+    return """http://localhost:8080/
+http://localhost:8080/api/users
+http://localhost:8080/api/users?id=1
+http://localhost:8080/search
+http://localhost:8080/search?q=test
+http://localhost:8080/login
+http://localhost:8080/admin/dashboard
+http://localhost:8080/api/products
+http://localhost:8080/api/orders?status=pending
+http://localhost:8080/static/js/app.js"""
+
+
+@pytest.fixture
+def mock_katana_subprocess():
+    """Factory fixture for creating mock subprocess.Popen objects.
+
+    Returns:
+        A factory function that creates configured mock Popen instances.
+
+    Example:
+        >>> mock_popen = mock_katana_subprocess(
+        ...     return_code=0,
+        ...     stdout_lines=["http://example.com/"],
+        ...     stderr_lines=[]
+        ... )
+    """
+    def _create_mock_popen(
+        return_code: int = 0,
+        stdout_lines: Optional[List[str]] = None,
+        stderr_lines: Optional[List[str]] = None,
+        wait_timeout: bool = False
+    ) -> MagicMock:
+        """Create a mock Popen object with configurable behavior.
+
+        Args:
+            return_code: Exit code for the process.
+            stdout_lines: Lines to return from stdout.readline().
+            stderr_lines: Lines to return from stderr.readline().
+            wait_timeout: If True, wait() raises TimeoutExpired.
+
+        Returns:
+            Configured MagicMock representing subprocess.Popen.
+        """
+        import subprocess
+
+        if stdout_lines is None:
+            stdout_lines = []
+        if stderr_lines is None:
+            stderr_lines = []
+
+        mock_process = MagicMock()
+
+        # Create stdout iterator that yields lines then empty string
+        stdout_iter = iter(stdout_lines + [''])
+        mock_process.stdout.readline = lambda: next(stdout_iter, '')
+
+        # Create stderr iterator
+        stderr_iter = iter(stderr_lines + [''])
+        mock_process.stderr.readline = lambda: next(stderr_iter, '')
+
+        # Configure wait behavior
+        if wait_timeout:
+            # First call with timeout raises TimeoutExpired,
+            # second call (after kill) returns normally
+            wait_call_count = [0]
+
+            def wait_side_effect(timeout=None):
+                wait_call_count[0] += 1
+                if wait_call_count[0] == 1 and timeout is not None:
+                    raise subprocess.TimeoutExpired(cmd="katana", timeout=timeout)
+                return return_code
+
+            mock_process.wait.side_effect = wait_side_effect
+        else:
+            mock_process.wait.return_value = return_code
+
+        mock_process.returncode = return_code
+        mock_process.kill = MagicMock()
+
+        return mock_process
+
+    return _create_mock_popen

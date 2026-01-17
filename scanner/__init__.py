@@ -35,6 +35,13 @@ from scanner.prompts import (
     format_prompt,
 )
 from scanner.report_generator import generate_report, save_report
+from scanner.katana_client import (
+    KatanaClient,
+    KatanaError,
+    KatanaNotInstalledError,
+    KatanaExecutionError,
+    KatanaTimeoutError,
+)
 
 __all__ = [
     # Version
@@ -57,4 +64,10 @@ __all__ = [
     # Report Generation
     "generate_report",
     "save_report",
+    # Katana Client
+    "KatanaClient",
+    "KatanaError",
+    "KatanaNotInstalledError",
+    "KatanaExecutionError",
+    "KatanaTimeoutError",
 ]

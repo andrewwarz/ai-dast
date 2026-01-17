@@ -548,3 +548,155 @@ class TestPerformance:
         # Report generation should complete in under 5 seconds
         assert elapsed < 5
 
+
+# =============================================================================
+# KATANA INTEGRATION TESTS
+# =============================================================================
+
+@pytest.mark.integration
+@pytest.mark.requires_katana
+class TestKatanaIntegration:
+    """Integration tests for Katana endpoint discovery.
+
+    These tests require Katana to be installed on the system.
+    Skip with: pytest -m "not requires_katana"
+    """
+
+    def test_katana_is_installed(self, katana_available):
+        """Verify Katana is installed and detectable."""
+        from scanner.katana_client import KatanaClient
+
+        client = KatanaClient()
+        assert client.is_katana_installed() is True
+
+    def test_katana_scan_real_target(self, katana_available, target_url):
+        """Test Katana scan against real vulnerable application."""
+        from scanner.katana_client import KatanaClient
+
+        client = KatanaClient()
+        # Use short timeout for testing
+        client.timeout = "30s"
+
+        endpoints = client.run_scan(target_url)
+
+        # Should find at least some endpoints
+        assert len(endpoints) > 0
+
+        # All items should be valid URLs
+        for endpoint in endpoints:
+            assert endpoint.startswith("http://") or endpoint.startswith("https://")
+
+        # URLs should contain target domain
+        assert any("localhost:8080" in url for url in endpoints)
+
+    def test_katana_scan_with_output_file(self, katana_available, target_url, tmp_path):
+        """Test Katana scan with output file."""
+        from scanner.katana_client import KatanaClient
+
+        client = KatanaClient()
+        client.timeout = "30s"
+        output_file = tmp_path / "katana_results.txt"
+
+        endpoints = client.run_scan(target_url, output_file=str(output_file))
+
+        # Output file should be created
+        assert output_file.exists()
+
+        # File should contain discovered endpoints
+        file_content = output_file.read_text()
+        assert len(file_content) > 0
+
+        # File content should match returned list
+        file_endpoints = [
+            line.strip() for line in file_content.split("\n") if line.strip()
+        ]
+        # Endpoints should be in the results (results are sorted/deduplicated)
+        for endpoint in endpoints:
+            assert endpoint in file_endpoints or endpoint in file_content
+
+    def test_katana_streaming_progress(self, katana_available, target_url):
+        """Test Katana streaming scan with progress tracking."""
+        from scanner.katana_client import KatanaClient
+
+        client = KatanaClient()
+        client.timeout = "30s"
+        progress_calls = []
+
+        def track_progress(count: int, url: str):
+            progress_calls.append((count, url))
+
+        endpoints = client.run_scan_streaming(
+            target_url,
+            progress_callback=track_progress
+        )
+
+        # Progress callback should be invoked
+        if len(endpoints) > 0:
+            assert len(progress_calls) > 0
+            # Endpoint count should increase monotonically
+            counts = [call[0] for call in progress_calls]
+            assert counts == sorted(counts)
+            # All counts should be positive
+            assert all(c > 0 for c in counts)
+
+    def test_katana_verify_installation(self, katana_available):
+        """Test verify_installation does not raise when installed."""
+        from scanner.katana_client import KatanaClient
+
+        client = KatanaClient()
+        # Should not raise
+        client.verify_installation()
+
+
+@pytest.mark.integration
+@pytest.mark.requires_target
+@pytest.mark.requires_ollama
+@pytest.mark.requires_katana
+@pytest.mark.slow
+class TestFullScanWithKatana:
+    """End-to-end tests with Katana endpoint discovery."""
+
+    def test_full_scan_with_katana_discovery(self, target_url):
+        """Complete scan workflow using Katana for endpoint discovery."""
+        if not is_target_available():
+            pytest.skip("Vulnerable application is not running on localhost:8080")
+        if not is_ollama_available():
+            pytest.skip("Ollama is not running on localhost:11434")
+
+        from tests.conftest import is_katana_available
+        if not is_katana_available():
+            pytest.skip("Katana is not installed")
+
+        from scanner.scanner import DASTScanner
+        from scanner.katana_client import KatanaClient
+
+        try:
+            # First, discover endpoints with Katana
+            katana_client = KatanaClient()
+            katana_client.timeout = "30s"
+
+            discovered_endpoints = katana_client.run_scan(target_url)
+
+            # Then run scanner on discovered endpoints
+            scanner = DASTScanner(
+                target_url=target_url,
+                max_requests=10,
+                verify_ssl=False
+            )
+            results = scanner.scan()
+
+            # Verify scan completed
+            assert "target_url" in results
+            assert "vulnerabilities" in results
+            assert "statistics" in results
+
+            # Verify we got some results
+            assert results["statistics"]["total_requests"] <= 10
+
+        except Exception as e:
+            if "No models available" in str(e) or "Cannot connect to Ollama" in str(e):
+                pytest.skip(f"Ollama not properly configured: {e}")
+            if "Katana not found" in str(e):
+                pytest.skip("Katana is not installed")
+            raise
+

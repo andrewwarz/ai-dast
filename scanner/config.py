@@ -198,7 +198,34 @@ PREFERRED_MODELS: List[str] = [
 DEFAULT_MODEL: Optional[str] = os.getenv("OLLAMA_MODEL")
 
 # Ollama server configuration
-OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+def _normalize_ollama_host(host: Optional[str]) -> str:
+    """Normalize Ollama host to a full URL with protocol and port.
+
+    Handles cases where OLLAMA_HOST might be set to just an IP address
+    (e.g., '0.0.0.0' or 'localhost') without the protocol or port.
+    """
+    if not host:
+        return "http://localhost:11434"
+
+    host = host.strip()
+
+    # If it already has a protocol, return as-is (but ensure port if missing)
+    if host.startswith("http://") or host.startswith("https://"):
+        # Check if port is missing
+        if host.count(":") == 1:  # Only protocol colon, no port
+            return f"{host}:11434"
+        return host
+
+    # Add http:// protocol and default port
+    # Handle cases like "0.0.0.0", "localhost", "127.0.0.1"
+    if ":" in host:
+        # Has a port already
+        return f"http://{host}"
+    else:
+        # No port, add default
+        return f"http://{host}:11434"
+
+OLLAMA_HOST: str = _normalize_ollama_host(os.getenv("OLLAMA_HOST"))
 
 # Request timeout in seconds (default 500s for complex AI reasoning)
 OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "500"))
@@ -300,6 +327,32 @@ MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "2048"))
 
 
 # =============================================================================
+# KATANA CONFIGURATION
+# =============================================================================
+
+# Katana executable path (auto-detected or from environment)
+KATANA_PATH: Optional[str] = os.getenv("KATANA_PATH", "katana")
+
+# Katana crawl depth (default: 4)
+KATANA_DEPTH: int = int(os.getenv("KATANA_DEPTH", "4"))
+
+# Katana concurrency (default: 5)
+KATANA_CONCURRENCY: int = int(os.getenv("KATANA_CONCURRENCY", "5"))
+
+# Katana crawl timeout (default: 3m)
+KATANA_TIMEOUT: str = os.getenv("KATANA_TIMEOUT", "3m")
+
+# File extensions to exclude from crawling
+KATANA_EXCLUDE_EXTENSIONS: List[str] = [
+    "png", "jpg", "gif", "svg", "ico", "css",
+    "woff", "woff2", "ttf", "eot", "map", "js"
+]
+
+# Regex patterns to filter out from results
+KATANA_FILTER_REGEX: str = r'node_modules|%5C|%7B|%7D|application/|socket\.io|Edge/|Trident/'
+
+
+# =============================================================================
 # CONFIGURATION SUMMARY
 # =============================================================================
 
@@ -347,5 +400,11 @@ def get_config_summary() -> dict:
         "max_response_body_size": MAX_RESPONSE_BODY_SIZE,
         "self_termination_window": SELF_TERMINATION_WINDOW,
         "max_response_tokens": MAX_RESPONSE_TOKENS,
+
+        # Katana settings
+        "katana_path": KATANA_PATH,
+        "katana_depth": KATANA_DEPTH,
+        "katana_concurrency": KATANA_CONCURRENCY,
+        "katana_timeout": KATANA_TIMEOUT,
     }
 

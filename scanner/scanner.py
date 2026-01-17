@@ -48,7 +48,14 @@ from scanner.prompts import (
     CREDENTIAL_LOGIN_PROMPT,
     ATTACK_VECTOR_ANALYSIS_PROMPT,
     SMART_ATTACK_PROMPT,
+    KATANA_RESULTS_ANALYSIS_PROMPT,
     format_prompt,
+)
+from scanner.katana_client import (
+    KatanaClient,
+    KatanaNotInstalledError,
+    KatanaExecutionError,
+    KatanaTimeoutError,
 )
 
 
@@ -191,6 +198,8 @@ class AttackVector:
     status: str = "pending"
     tested_attacks: List[str] = field(default_factory=list)
     findings: List[str] = field(default_factory=list)
+    endpoint_category: Optional[str] = None
+    katana_priority_level: Optional[str] = None  # high_priority, medium_priority, low_priority
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert attack vector to dictionary format."""
@@ -207,6 +216,8 @@ class AttackVector:
             "status": self.status,
             "tested_attacks": self.tested_attacks,
             "findings": self.findings,
+            "endpoint_category": self.endpoint_category,
+            "katana_priority_level": self.katana_priority_level,
         }
 
 
@@ -242,6 +253,8 @@ class ScanProgress:
         start_time: When the scan started.
         last_update_time: When progress was last updated.
         status_message: Human-readable status message.
+        katana_endpoints_discovered: Endpoints discovered by Katana.
+        katana_scan_active: Whether a Katana scan is currently running.
     """
     phase: str = ScanPhase.INITIALIZING
     phase_progress: float = 0.0
@@ -257,6 +270,12 @@ class ScanProgress:
     start_time: Optional[float] = None
     last_update_time: Optional[float] = None
     status_message: str = "Initializing..."
+    katana_endpoints_discovered: int = 0
+    katana_scan_active: bool = False
+    katana_current_url: str = ""
+    katana_crawl_depth_current: int = 0
+    katana_crawl_depth_max: int = 0
+    katana_status_phase: str = ""
 
     def get_overall_progress(self) -> float:
         """Calculate overall scan progress percentage."""
@@ -313,6 +332,12 @@ class ScanProgress:
             "requests_sent": self.requests_sent,
             "elapsed_seconds": round(elapsed, 1),
             "status_message": self.status_message,
+            "katana_endpoints_discovered": self.katana_endpoints_discovered,
+            "katana_scan_active": self.katana_scan_active,
+            "katana_current_url": self.katana_current_url,
+            "katana_crawl_depth_current": self.katana_crawl_depth_current,
+            "katana_crawl_depth_max": self.katana_crawl_depth_max,
+            "katana_status_phase": self.katana_status_phase,
         }
 
     def format_status_line(self) -> str:
@@ -321,9 +346,54 @@ class ScanProgress:
         if self.phase == ScanPhase.INITIALIZING:
             return f"[{progress:5.1f}%] 🚀 Initializing scan..."
         elif self.phase == ScanPhase.DISCOVERY:
+            # Show Katana-specific status based on phase
+            if self.katana_scan_active and self.katana_status_phase == "initializing":
+                return (
+                    f"[{progress:5.1f}%] 🚀 Discovery: "
+                    f"Initializing Katana headless browser..."
+                )
+            if self.katana_scan_active and self.katana_status_phase == "crawling":
+                # Truncate current URL for display
+                url_display = self.katana_current_url[:50]
+                if len(self.katana_current_url) > 50:
+                    url_display += "..."
+                depth_info = ""
+                if self.katana_crawl_depth_max > 0:
+                    depth_info = (
+                        f"depth {self.katana_crawl_depth_current}/"
+                        f"{self.katana_crawl_depth_max} | "
+                    )
+                return (
+                    f"[{progress:5.1f}%] 🕷️ Discovery: Katana crawling ({depth_info}"
+                    f"{self.katana_endpoints_discovered} endpoints) | {url_display}"
+                )
+            if self.katana_scan_active and self.katana_status_phase == "parsing":
+                return (
+                    f"[{progress:5.1f}%] 📋 Discovery: Parsing Katana results... "
+                    f"{self.katana_endpoints_discovered} endpoints found"
+                )
+            if self.katana_status_phase == "extracting_forms":
+                return (
+                    f"[{progress:5.1f}%] 📝 Discovery: "
+                    f"Extracting forms from {self.katana_endpoints_discovered} "
+                    f"Katana endpoints..."
+                )
+            # Fallback for legacy katana_scan_active without phase
+            if self.katana_scan_active:
+                return (
+                    f"[{progress:5.1f}%] 🔍 Discovery: Katana scanning... "
+                    f"{self.katana_endpoints_discovered} endpoints found"
+                )
             # Show status message during initial discovery, then show counts
             if self.total_endpoints_found == 0 and self.total_forms_found == 0:
                 return f"[{progress:5.1f}%] 🔍 Discovery: {self.status_message}"
+            # Show form extraction progress if Katana was used
+            if self.katana_endpoints_discovered > 0:
+                return (
+                    f"[{progress:5.1f}%] 🔍 Discovery: "
+                    f"Extracting forms from {self.total_endpoints_found} Katana endpoints, "
+                    f"{self.total_forms_found} forms"
+                )
             return (
                 f"[{progress:5.1f}%] 🔍 Discovery: "
                 f"Found {self.total_endpoints_found} endpoints, "
@@ -444,6 +514,11 @@ class DASTScanner:
             follow_redirects=True,
             proxy=proxy
         )
+
+        # Katana client for endpoint discovery
+        self._katana_client = KatanaClient()
+        self._katana_available: bool = False
+        self._katana_analysis_results: Dict[str, Any] = {}
 
         # State tracking
         self.vulnerabilities: List[Vulnerability] = []
@@ -642,6 +717,12 @@ class DASTScanner:
                 "attack_vectors_tested": vectors_completed,
                 "attack_vectors_vulnerable": vectors_with_findings,
                 "forms_discovered": len(self.discovered_forms),
+                # Katana statistics
+                "katana_used": (
+                    self._katana_available
+                    and self.progress.katana_endpoints_discovered > 0
+                ),
+                "katana_endpoints_discovered": self.progress.katana_endpoints_discovered,
             },
             "model_info": self._ai_client.get_model_info(),
             "tested_vectors": self.tested_vectors,
@@ -663,11 +744,15 @@ class DASTScanner:
 
         return results
 
-    def _perform_reconnaissance(self) -> None:
+    def _perform_reconnaissance(self) -> Optional[HTTPResponse]:
         """Perform initial reconnaissance on the target.
 
         Sends initial request to gather technology hints and
         identify potential entry points for testing.
+
+        Returns:
+            The initial HTTPResponse from the target (for potential re-use
+            if Katana fails and we need to extract endpoints later).
         """
         try:
             # Send initial GET request to target
@@ -706,17 +791,33 @@ class DASTScanner:
                         f"fields={field_names}"
                     )
 
-            # Extract additional endpoints from response and queue for testing
-            endpoints = self._extract_endpoints(response)
-            for endpoint in endpoints:
+            # Always extract and queue endpoints from the initial response
+            # This ensures manual crawling has seeds even if Katana fails at runtime
+            initial_endpoints = self._extract_endpoints(response)
+
+            # Always queue endpoints - provides baseline coverage even if Katana
+            # partially succeeds or fails. Katana will discover more anyway.
+            for endpoint in initial_endpoints:
                 if endpoint not in self.tested_endpoints:
                     self.pending_endpoints.add(endpoint)
-            logger.info(
-                f"Reconnaissance complete. "
-                f"Found {len(endpoints)} potential endpoints, "
-                f"{len(self.discovered_forms)} forms, "
-                f"{len(self.pending_endpoints)} queued for testing."
-            )
+
+            if self._katana_available:
+                logger.info(
+                    f"Reconnaissance complete. "
+                    f"Found {len(initial_endpoints)} potential endpoints, "
+                    f"{len(self.discovered_forms)} forms. "
+                    f"Katana will discover additional endpoints."
+                )
+            else:
+                logger.info(
+                    f"Reconnaissance complete. "
+                    f"Found {len(initial_endpoints)} potential endpoints, "
+                    f"{len(self.discovered_forms)} forms, "
+                    f"{len(self.pending_endpoints)} queued for testing."
+                )
+
+            # Return response for potential later use if Katana fails
+            return response
 
         except HTTPClientError as e:
             logger.error(f"Reconnaissance failed: {e}")
@@ -729,23 +830,304 @@ class DASTScanner:
     def _discovery_phase(self) -> None:
         """Phase 1: Discover all endpoints, forms, and potential attack surfaces.
 
-        Crawls the application breadth-first, extracting:
+        Uses Katana for comprehensive endpoint discovery when available,
+        with fallback to manual breadth-first crawling. Extracts:
         - All reachable endpoints
         - Forms with their input fields
         - URL parameters
         - Technology hints
         """
-        # Start with initial reconnaissance
-        self._perform_reconnaissance()
+        # Phase 1: Check Katana availability
+        self._update_progress(
+            status_message="Checking Katana availability...",
+            phase_progress=5.0
+        )
+
+        try:
+            self._katana_available = self._katana_client.is_katana_installed()
+        except Exception as e:
+            logger.warning(f"Error checking Katana availability: {e}")
+            self._katana_available = False
+
+        if self._katana_available:
+            logger.info("Katana is available - will use for endpoint discovery")
+        else:
+            logger.warning(
+                "Katana not available - falling back to manual crawling. "
+                "Install Katana for better coverage: brew install katana"
+            )
+
+        # Phase 2: Perform initial reconnaissance
+        # Store the response so we can re-extract endpoints if Katana fails
+        initial_response = self._perform_reconnaissance()
 
         # Update progress with initial findings
         self._update_progress(
             total_endpoints_found=len(self.tested_endpoints) + len(self.pending_endpoints),
             total_forms_found=len(self.discovered_forms),
-            phase_progress=30.0
+            phase_progress=10.0
         )
 
-        # Continue crawling pending endpoints (breadth-first discovery)
+        # Track whether we need to fall back to manual crawling
+        use_manual_crawling = not self._katana_available
+        katana_endpoints: List[str] = []
+
+        # Phase 3: Run Katana scan (if available)
+        if self._katana_available:
+            try:
+                # Update progress with initialization phase
+                self._update_progress(
+                    katana_scan_active=True,
+                    katana_status_phase="initializing",
+                    katana_crawl_depth_max=self._katana_client.depth,
+                    status_message="Initializing Katana headless browser...",
+                    phase_progress=15.0
+                )
+
+                # Create a progress callback for streaming updates
+                def katana_progress_callback(endpoint_count: int, current_url: str) -> None:
+                    """Callback for real-time Katana progress updates."""
+                    # Calculate depth from URL path
+                    try:
+                        parsed_url = urlparse(current_url)
+                        path_segments = [s for s in parsed_url.path.split('/') if s]
+                        current_depth = len(path_segments)
+                    except Exception:
+                        current_depth = 0
+
+                    # Progress from 15% to 45% during crawling
+                    crawl_progress = 15.0 + min(30.0, endpoint_count * 0.5)
+
+                    self._update_progress(
+                        katana_scan_active=True,
+                        katana_status_phase="crawling",
+                        katana_endpoints_discovered=endpoint_count,
+                        katana_current_url=current_url,
+                        katana_crawl_depth_current=current_depth,
+                        phase_progress=crawl_progress,
+                        status_message=f"Katana crawling: {endpoint_count} endpoints found"
+                    )
+
+                # Run streaming Katana scan
+                katana_endpoints = self._katana_client.run_scan_streaming(
+                    self.target_url,
+                    progress_callback=katana_progress_callback
+                )
+                logger.info(f"Katana discovered {len(katana_endpoints)} endpoints")
+
+                # Update with parsing phase
+                self._update_progress(
+                    katana_scan_active=True,
+                    katana_status_phase="parsing",
+                    katana_endpoints_discovered=len(katana_endpoints),
+                    phase_progress=45.0,
+                    status_message=f"Parsing {len(katana_endpoints)} Katana results..."
+                )
+
+                # Phase 4: Process Katana results - convert URLs to relative paths
+                for endpoint in katana_endpoints:
+                    parsed = urlparse(endpoint)
+                    # Extract path, preserving query parameters for testing
+                    path = parsed.path or "/"
+                    if parsed.query:
+                        path = f"{path}?{parsed.query}"
+                    if path not in self.tested_endpoints:
+                        self.pending_endpoints.add(path)
+
+                # Update with AI analysis phase
+                self._update_progress(
+                    katana_scan_active=False,
+                    katana_status_phase="ai_analyzing",
+                    katana_endpoints_discovered=len(katana_endpoints),
+                    katana_current_url="",
+                    total_endpoints_found=len(katana_endpoints),
+                    phase_progress=50.0,
+                    status_message=f"AI analyzing {len(katana_endpoints)} Katana results..."
+                )
+
+                # Analyze Katana endpoints using AI for categorization
+                self._katana_analysis_results = self._analyze_katana_endpoints(
+                    katana_endpoints
+                )
+
+                # Update with form extraction phase
+                self._update_progress(
+                    katana_status_phase="extracting_forms",
+                    phase_progress=55.0,
+                    status_message=f"Extracting forms from {len(katana_endpoints)} endpoints"
+                )
+
+            except KatanaNotInstalledError as e:
+                logger.warning(
+                    f"⚠️ Katana not installed - falling back to manual crawling. {e}"
+                )
+                self._katana_available = False
+                use_manual_crawling = True
+                self._update_progress(
+                    katana_scan_active=False,
+                    katana_status_phase="",
+                    katana_current_url=""
+                )
+            except KatanaTimeoutError as e:
+                logger.error(
+                    f"⏱️ Katana scan timed out: {e}. "
+                    f"Consider reducing KATANA_DEPTH or increasing KATANA_TIMEOUT in config"
+                )
+                self._katana_available = False
+                use_manual_crawling = True
+                self._update_progress(
+                    katana_scan_active=False,
+                    katana_status_phase="",
+                    katana_current_url=""
+                )
+            except KatanaExecutionError as e:
+                logger.error(f"❌ Katana execution failed - falling back to manual crawling: {e}")
+                logger.debug(f"Katana execution error details: {e}")
+                self._katana_available = False
+                use_manual_crawling = True
+                self._update_progress(
+                    katana_scan_active=False,
+                    katana_status_phase="",
+                    katana_current_url=""
+                )
+            except Exception as e:
+                logger.error(f"🔧 Unexpected Katana error - falling back to manual crawling: {e}")
+                logger.debug(f"Unexpected Katana error details: {e}", exc_info=True)
+                self._katana_available = False
+                use_manual_crawling = True
+                self._update_progress(
+                    katana_scan_active=False,
+                    katana_status_phase="",
+                    katana_current_url=""
+                )
+
+        # Phase 5: Extract forms from Katana-discovered endpoints
+        if katana_endpoints and not use_manual_crawling:
+            self._extract_forms_from_endpoints()
+        elif use_manual_crawling:
+            # FALLBACK: Manual breadth-first crawling
+            # This code runs only if Katana is unavailable or fails
+            # Katana provides superior coverage with headless browser support
+            if self._katana_available is False and katana_endpoints == []:
+                # Katana was available but failed at runtime
+                logger.warning(
+                    "Katana failed at runtime, falling back to manual crawling "
+                    f"with {len(self.pending_endpoints)} root-extracted seeds"
+                )
+            else:
+                # Katana was never available
+                logger.warning(
+                    f"Katana unavailable, using manual crawling "
+                    f"with {len(self.pending_endpoints)} seeds"
+                )
+
+            # Safety net: Re-populate pending_endpoints from initial response if empty
+            # This should rarely happen now since recon always queues endpoints,
+            # but provides robustness if endpoint extraction found nothing initially
+            if not self.pending_endpoints and initial_response:
+                logger.info("Re-extracting endpoints from initial response for manual crawl")
+                initial_endpoints = self._extract_endpoints(initial_response)
+                for endpoint in initial_endpoints:
+                    if endpoint not in self.tested_endpoints:
+                        self.pending_endpoints.add(endpoint)
+                logger.info(
+                    f"Populated {len(self.pending_endpoints)} endpoints for manual crawling"
+                )
+
+            # Only proceed with manual crawling if we have endpoints to crawl
+            if self.pending_endpoints:
+                self._manual_discovery_crawl()
+            else:
+                logger.warning(
+                    "No endpoints available for manual crawling. "
+                    "Discovery limited to root endpoint only."
+                )
+
+        # Final progress update
+        self._update_progress(
+            phase_progress=100.0,
+            status_message=f"Discovery complete: {len(self.tested_endpoints)} endpoints, "
+                          f"{len(self.discovered_forms)} forms"
+        )
+
+        logger.info(
+            f"Discovery complete: {len(self.tested_endpoints)} endpoints visited, "
+            f"{len(self.discovered_forms)} forms found, "
+            f"{len(self.pending_endpoints)} endpoints remaining"
+        )
+
+    def _extract_forms_from_endpoints(self) -> None:
+        """Extract forms from discovered endpoints after Katana scan.
+
+        Visits a subset of Katana-discovered endpoints to extract forms
+        and additional metadata for attack surface analysis.
+        """
+        # Calculate limit to avoid excessive requests
+        form_extraction_limit = min(
+            30,
+            len(self.pending_endpoints),
+            (self.max_requests - self.request_count) if self.max_requests else 30
+        )
+
+        if form_extraction_limit <= 0:
+            logger.debug("No capacity for form extraction")
+            return
+
+        self._update_progress(
+            status_message=f"Extracting forms from {form_extraction_limit} endpoints",
+            phase_progress=60.0
+        )
+
+        processed = 0
+        # Convert to list to avoid modifying set during iteration
+        endpoints_to_visit = list(self.pending_endpoints)[:form_extraction_limit]
+
+        for endpoint in endpoints_to_visit:
+            if self.max_requests and self.request_count >= self.max_requests:
+                logger.debug("Request limit reached during form extraction")
+                break
+
+            if endpoint in self.tested_endpoints:
+                continue
+
+            try:
+                url = urljoin(self.target_url, endpoint)
+                response = self._http_client.send_request(url=url, method="GET")
+                self.request_count += 1
+                processed += 1
+                self.tested_endpoints.add(endpoint)
+                self.pending_endpoints.discard(endpoint)
+
+                # Extract forms from this page
+                forms = self._extract_forms(response, endpoint)
+                for form in forms:
+                    if form not in self.discovered_forms:
+                        self.discovered_forms.append(form)
+
+                # Update progress every 5 endpoints
+                if processed % 5 == 0:
+                    progress = 60.0 + (processed / form_extraction_limit * 35.0)
+                    self._update_progress(
+                        total_endpoints_found=len(self.tested_endpoints) + len(self.pending_endpoints),
+                        total_forms_found=len(self.discovered_forms),
+                        phase_progress=progress,
+                        status_message=f"Extracting forms: {processed}/{form_extraction_limit} endpoints"
+                    )
+
+            except HTTPClientError as e:
+                logger.debug(f"Failed to extract forms from {endpoint}: {e}")
+
+        logger.info(
+            f"Form extraction complete: visited {processed} endpoints, "
+            f"found {len(self.discovered_forms)} forms"
+        )
+
+    def _manual_discovery_crawl(self) -> None:
+        """Perform manual breadth-first crawling for endpoint discovery.
+
+        This is the fallback method when Katana is not available.
+        Crawls pending endpoints, extracting forms and additional endpoints.
+        """
         visited_in_discovery = 0
         max_discovery_requests = min(50, self.max_requests or 50)
 
@@ -780,7 +1162,7 @@ class DASTScanner:
                 # Update progress
                 progress = min(
                     100.0,
-                    (visited_in_discovery / max_discovery_requests) * 100
+                    30.0 + (visited_in_discovery / max_discovery_requests) * 65.0
                 )
                 self._update_progress(
                     total_endpoints_found=len(self.tested_endpoints) + len(self.pending_endpoints),
@@ -792,17 +1174,160 @@ class DASTScanner:
             except HTTPClientError as e:
                 logger.debug(f"Failed to crawl {endpoint}: {e}")
 
-        logger.info(
-            f"Discovery complete: {len(self.tested_endpoints)} endpoints visited, "
-            f"{len(self.discovered_forms)} forms found, "
-            f"{len(self.pending_endpoints)} endpoints remaining"
+    def _analyze_katana_endpoints(self, endpoints: List[str]) -> Dict[str, Any]:
+        """Analyze Katana-discovered endpoints using AI to categorize by risk.
+
+        Sends endpoints to the LLM for security-focused categorization,
+        identifying high-value targets for attack prioritization.
+
+        Args:
+            endpoints: List of endpoint URLs discovered by Katana.
+
+        Returns:
+            Dictionary with categorized endpoints by priority level.
+        """
+        import json
+
+        if not endpoints:
+            logger.debug("No endpoints to analyze")
+            return {}
+
+        # Select top endpoints to stay within token limits
+        selected_endpoints = self._select_endpoints_for_analysis(endpoints)
+
+        if not selected_endpoints:
+            logger.debug("No high-value endpoints selected for analysis")
+            return {}
+
+        # Format endpoints for prompt
+        endpoints_list = "\n".join(f"- {ep}" for ep in selected_endpoints)
+
+        prompt = format_prompt(
+            KATANA_RESULTS_ANALYSIS_PROMPT,
+            target_url=self.target_url,
+            endpoints_list=endpoints_list
         )
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            logger.info(f"AI analyzing {len(selected_endpoints)} endpoints for categorization")
+            response = self._ai_client.chat_with_retry(messages)
+
+            # Parse the JSON response
+            analysis_result = self._parse_katana_analysis_response(response)
+
+            if analysis_result:
+                high_count = len(analysis_result.get("high_priority", []))
+                medium_count = len(analysis_result.get("medium_priority", []))
+                low_count = len(analysis_result.get("low_priority", []))
+                logger.info(
+                    f"Katana analysis complete: {high_count} high, "
+                    f"{medium_count} medium, {low_count} low priority endpoints"
+                )
+
+            return analysis_result
+
+        except OllamaEngineError as e:
+            logger.warning(f"Katana endpoint analysis failed: {e}")
+            return {}
+
+    def _select_endpoints_for_analysis(
+        self, endpoints: List[str], max_endpoints: int = 100
+    ) -> List[str]:
+        """Select top endpoints for AI analysis based on security relevance.
+
+        Scores endpoints by keywords suggesting security-sensitive functionality
+        and returns the highest-scoring ones to stay within token limits.
+
+        Args:
+            endpoints: Full list of discovered endpoints.
+            max_endpoints: Maximum number of endpoints to return.
+
+        Returns:
+            List of selected high-value endpoints.
+        """
+        # Scoring keywords - higher score = more interesting for security testing
+        high_value_keywords = {
+            # Authentication (score: 10)
+            "login": 10, "signin": 10, "auth": 10, "logout": 10, "signout": 10,
+            "register": 10, "signup": 10, "password": 10, "reset": 10, "forgot": 10,
+            "session": 10, "token": 10, "oauth": 10, "sso": 10,
+            # Admin/Management (score: 9)
+            "admin": 9, "manage": 9, "dashboard": 9, "control": 9, "panel": 9,
+            "config": 9, "settings": 9, "console": 9, "backend": 9,
+            # File Operations (score: 8)
+            "upload": 8, "download": 8, "file": 8, "document": 8, "import": 8,
+            "export": 8, "attachment": 8, "media": 8,
+            # API/Data (score: 7)
+            "api": 7, "graphql": 7, "rest": 7, "json": 7, "xml": 7,
+            "user": 7, "account": 7, "profile": 7,
+            # Database/Query (score: 6)
+            "search": 6, "query": 6, "filter": 6, "sort": 6, "list": 6,
+            "id=": 6, "pid=": 6, "uid=": 6, "page=": 6,
+            # Payment/Financial (score: 8)
+            "payment": 8, "checkout": 8, "cart": 8, "order": 8, "billing": 8,
+            "invoice": 8, "subscription": 8, "credit": 8,
+        }
+
+        # Low-value patterns to deprioritize
+        low_value_patterns = [
+            r"\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$",
+            r"^/static/", r"^/assets/", r"^/images/", r"^/fonts/",
+            r"^/node_modules/", r"^/vendor/",
+        ]
+
+        scored_endpoints: List[tuple] = []
+
+        for endpoint in endpoints:
+            endpoint_lower = endpoint.lower()
+            score = 0
+
+            # Check for low-value patterns first
+            is_low_value = False
+            for pattern in low_value_patterns:
+                if re.search(pattern, endpoint_lower):
+                    is_low_value = True
+                    break
+
+            if is_low_value:
+                score = -10  # Still include but at bottom
+            else:
+                # Score by keywords
+                for keyword, keyword_score in high_value_keywords.items():
+                    if keyword in endpoint_lower:
+                        score += keyword_score
+
+                # Bonus for endpoints with parameters
+                if "?" in endpoint or "=" in endpoint:
+                    score += 5
+
+                # Bonus for dynamic-looking paths
+                if re.search(r"/\d+(/|$|\?)", endpoint):
+                    score += 3  # Likely ID in path
+
+            scored_endpoints.append((score, endpoint))
+
+        # Sort by score descending, take top N
+        scored_endpoints.sort(key=lambda x: x[0], reverse=True)
+
+        selected = [ep for score, ep in scored_endpoints[:max_endpoints]]
+
+        logger.debug(
+            f"Selected {len(selected)} of {len(endpoints)} endpoints for AI analysis"
+        )
+
+        return selected
 
     def _analysis_phase(self) -> None:
         """Phase 2: Have LLM analyze discovered elements and identify attack vectors.
 
         Sends all discovered forms, endpoints, and parameters to the LLM
         for analysis. The LLM identifies what attacks should be tried on each element.
+        Integrates Katana endpoint analysis for enhanced prioritization.
         """
         import json
 
@@ -810,6 +1335,11 @@ class DASTScanner:
         forms_desc = self._format_forms_for_analysis()
         params_desc = self._format_params_for_analysis()
         endpoints_desc = self._format_endpoints_for_analysis()
+
+        # Enhance endpoints description with Katana high-priority insights
+        katana_insights = self._format_katana_insights_for_analysis()
+        if katana_insights:
+            endpoints_desc = (endpoints_desc or "") + "\n\n" + katana_insights
 
         # Ask LLM to analyze and identify attack vectors
         prompt = format_prompt(
@@ -837,6 +1367,19 @@ class DASTScanner:
             # Parse the JSON response
             attack_vectors = self._parse_attack_vector_analysis(response)
 
+            # Enrich attack vectors with Katana endpoint categories
+            if self._katana_analysis_results:
+                self._update_progress(
+                    phase_progress=60.0,
+                    status_message="Enriching vectors with Katana insights..."
+                )
+                attack_vectors = self._enrich_vectors_with_katana_categories(
+                    attack_vectors
+                )
+
+            # Apply category-based priority boost
+            attack_vectors = self._apply_category_priority_boost(attack_vectors)
+
             # Sort by priority (lower = higher priority)
             attack_vectors.sort(key=lambda x: x.priority)
 
@@ -852,10 +1395,11 @@ class DASTScanner:
                 f"Analysis complete: {len(attack_vectors)} attack vectors identified"
             )
 
-            # Log summary of attack vectors
+            # Log summary of attack vectors with categories
             for av in attack_vectors[:5]:  # Log top 5
+                category_info = f" [{av.endpoint_category}]" if av.endpoint_category else ""
                 logger.info(
-                    f"  [{av.priority}] {av.element_type}:{av.element_name} -> "
+                    f"  [{av.priority}]{category_info} {av.element_type}:{av.element_name} -> "
                     f"{', '.join(av.suggested_attacks[:2])}"
                 )
             if len(attack_vectors) > 5:
@@ -1006,6 +1550,11 @@ class DASTScanner:
                 if vector.form_data:
                     # Form-based attack
                     finding = self._execute_form_payload(
+                        vector, attack_type, payload, inject_field
+                    )
+                elif vector.element_type == "api_endpoint":
+                    # API endpoint attack - use POST with JSON body
+                    finding = self._execute_api_payload(
                         vector, attack_type, payload, inject_field
                     )
                 else:
@@ -1173,6 +1722,114 @@ class DASTScanner:
             logger.debug(f"URL payload test failed: {e}")
             return False
 
+    def _execute_api_payload(
+        self,
+        vector: AttackVector,
+        attack_type: str,
+        payload: str,
+        inject_field: str
+    ) -> bool:
+        """Execute a payload against an API endpoint attack vector.
+
+        Sends payloads in JSON body for REST API endpoints.
+        Also tests SQL injection in URL path segments.
+
+        Args:
+            vector: Attack vector (API endpoint).
+            attack_type: Type of attack being tested.
+            payload: The payload to inject.
+            inject_field: Field name to inject into (for JSON body).
+
+        Returns:
+            True if vulnerability indicator found.
+        """
+        import json as json_lib
+
+        findings = []
+
+        try:
+            # Method 1: POST request with JSON body containing payload
+            if vector.method.upper() in ("POST", "PUT", "PATCH"):
+                json_body = {inject_field: payload}
+
+                # Also add common fields that APIs might expect
+                if "user" in vector.endpoint.lower() or "login" in vector.endpoint.lower():
+                    json_body.update({
+                        "email": payload if "email" in inject_field.lower() else "test@test.com",
+                        "password": payload if "pass" in inject_field.lower() else "test123"
+                    })
+
+                response = self._http_client.send_request(
+                    url=vector.url,
+                    method=vector.method.upper(),
+                    body=json_body,
+                    headers={"Content-Type": "application/json"}
+                )
+                self.request_count += 1
+
+                # Analyze the response
+                context = (
+                    f"Testing {attack_type} on API endpoint '{vector.endpoint}' "
+                    f"via {vector.method} with JSON payload: {json_lib.dumps(json_body)[:200]}"
+                )
+                analysis = self._analyze_response(response, context=context)
+
+                if self._check_for_vulnerability(analysis):
+                    self._parse_and_record_vulnerability(
+                        analysis=analysis,
+                        vuln_type=attack_type,
+                        url=vector.url,
+                        method=vector.method,
+                        payload=json_lib.dumps(json_body),
+                        response=response
+                    )
+                    logger.warning(
+                        f"🎯 VULNERABILITY FOUND: {attack_type} in API {vector.endpoint}"
+                    )
+                    return True
+
+            # Method 2: GET request with payload in query parameter
+            test_url = vector.url
+            if "?" in test_url:
+                test_url = f"{test_url}&{inject_field}={payload}"
+            else:
+                test_url = f"{test_url}?{inject_field}={payload}"
+
+            response = self._http_client.send_request(url=test_url, method="GET")
+            self.request_count += 1
+
+            context = (
+                f"Testing {attack_type} on API endpoint '{vector.endpoint}' "
+                f"via GET with query param: {inject_field}={payload[:100]}"
+            )
+            analysis = self._analyze_response(response, context=context)
+
+            if self._check_for_vulnerability(analysis):
+                self._parse_and_record_vulnerability(
+                    analysis=analysis,
+                    vuln_type=attack_type,
+                    url=test_url,
+                    method="GET",
+                    payload=f"{inject_field}={payload}",
+                    response=response
+                )
+                logger.warning(
+                    f"🎯 VULNERABILITY FOUND: {attack_type} in API query param {vector.endpoint}"
+                )
+                return True
+
+            # Track tested
+            self.tested_endpoints.add(vector.endpoint)
+            if attack_type not in self.tested_vectors:
+                self.tested_vectors[attack_type] = []
+            self.tested_vectors[attack_type].append(payload[:50])
+
+            return False
+
+        except HTTPClientError as e:
+            logger.debug(f"API payload test failed: {e}")
+            return False
+
     def _execute_generic_attack(
         self,
         vector: AttackVector,
@@ -1275,8 +1932,38 @@ class DASTScanner:
             logger.warning("No JSON array found in attack vector analysis")
             return self._create_fallback_attack_vectors()
 
+        # Try parsing the matched JSON, with fallback for malformed responses
+        json_str = json_match.group()
+        data = None
+
         try:
-            data = json.loads(json_match.group())
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            # Try to find and parse just the first complete JSON array
+            # by finding matching brackets
+            logger.debug(f"Initial JSON parse failed: {e}, trying bracket matching")
+            bracket_count = 0
+            start_idx = json_str.find('[')
+            if start_idx != -1:
+                for i, char in enumerate(json_str[start_idx:], start_idx):
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            # Found the complete first array
+                            try:
+                                data = json.loads(json_str[start_idx:i+1])
+                                logger.info(f"Successfully parsed JSON array with bracket matching")
+                                break
+                            except json.JSONDecodeError:
+                                pass
+
+        if data is None:
+            logger.warning("Failed to parse attack vector JSON after all attempts")
+            return self._create_fallback_attack_vectors()
+
+        try:
 
             for item in data:
                 # Find associated form if this is form-based
@@ -1309,7 +1996,7 @@ class DASTScanner:
             return self._create_fallback_attack_vectors()
 
     def _create_fallback_attack_vectors(self) -> List[AttackVector]:
-        """Create attack vectors from discovered forms when LLM analysis fails."""
+        """Create attack vectors from discovered forms and Katana endpoints when LLM analysis fails."""
         vectors = []
 
         # Create vectors for each form field
@@ -1352,7 +2039,210 @@ class DASTScanner:
                 )
                 vectors.append(vector)
 
+        # If no forms, create vectors from Katana high-priority endpoints
+        if not vectors and self._katana_analysis_results:
+            high_priority = self._katana_analysis_results.get("high_priority", [])
+            medium_priority = self._katana_analysis_results.get("medium_priority", [])
+
+            # Combine high and medium priority endpoints
+            priority_endpoints = high_priority + medium_priority[:5]
+
+            for item in priority_endpoints:
+                endpoint = item.get("endpoint", "")
+                if not endpoint:
+                    continue
+
+                # Determine attacks based on endpoint pattern
+                suggested = item.get("suggested_attacks", [])
+                if not suggested:
+                    endpoint_lower = endpoint.lower()
+                    if any(x in endpoint_lower for x in ("login", "auth", "user")):
+                        suggested = ["SQL Injection", "Authentication Bypass", "XSS"]
+                    elif any(x in endpoint_lower for x in ("api", "rest")):
+                        suggested = ["SQL Injection", "Broken Access Control", "API Security"]
+                    elif any(x in endpoint_lower for x in ("search", "query")):
+                        suggested = ["SQL Injection", "XSS"]
+                    elif any(x in endpoint_lower for x in ("file", "upload", "download")):
+                        suggested = ["Path Traversal", "File Upload Vulnerability"]
+                    elif any(x in endpoint_lower for x in ("redirect", "url", "link")):
+                        suggested = ["Open Redirect", "SSRF"]
+                    else:
+                        suggested = ["SQL Injection", "XSS", "Broken Access Control"]
+
+                # Determine method - POST for auth/create endpoints, GET otherwise
+                method = "POST" if any(x in endpoint.lower() for x in ("login", "create", "register", "add")) else "GET"
+
+                vector = AttackVector(
+                    id=self._generate_attack_vector_id(),
+                    url=urljoin(self.target_url, endpoint),
+                    endpoint=endpoint,
+                    method=method,
+                    element_type="api_endpoint",
+                    element_name=endpoint.split("/")[-1] or "endpoint",
+                    element_context=f"Katana-discovered endpoint: {item.get('category', 'unknown')}",
+                    suggested_attacks=suggested,
+                    priority=1 if item in high_priority else 2,
+                    form_data=None,
+                )
+                vectors.append(vector)
+
         logger.info(f"Created {len(vectors)} fallback attack vectors")
+        return vectors
+
+    def _format_katana_insights_for_analysis(self) -> str:
+        """Format Katana analysis insights for inclusion in attack vector analysis.
+
+        Returns:
+            Formatted string with high-priority endpoint insights.
+        """
+        if not self._katana_analysis_results:
+            return ""
+
+        high_priority = self._katana_analysis_results.get("high_priority", [])
+        if not high_priority:
+            return ""
+
+        lines = ["## High-Priority Endpoints (from AI-categorized Katana results):"]
+        for item in high_priority[:10]:  # Limit to top 10
+            endpoint = item.get("endpoint", "")
+            category = item.get("category", "Unknown")
+            reasoning = item.get("reasoning", "")
+            suggested = item.get("suggested_attacks", [])
+            lines.append(
+                f"- **{endpoint}** [{category}]: {reasoning}"
+            )
+            if suggested:
+                lines.append(f"  Suggested: {', '.join(suggested[:3])}")
+
+        return "\n".join(lines)
+
+    def _enrich_vectors_with_katana_categories(
+        self, vectors: List[AttackVector]
+    ) -> List[AttackVector]:
+        """Enrich attack vectors with endpoint categories from Katana analysis.
+
+        Matches attack vectors to categorized Katana endpoints and sets
+        the endpoint_category field. Also adds Katana-suggested attacks.
+
+        Args:
+            vectors: List of attack vectors to enrich.
+
+        Returns:
+            Enriched attack vectors.
+        """
+        if not self._katana_analysis_results:
+            return vectors
+
+        # Build endpoint-to-category lookup from all priority levels
+        endpoint_lookup: Dict[str, Dict[str, Any]] = {}
+
+        for priority_level in ["high_priority", "medium_priority", "low_priority"]:
+            for item in self._katana_analysis_results.get(priority_level, []):
+                endpoint = item.get("endpoint", "")
+                if endpoint:
+                    endpoint_lookup[endpoint] = {
+                        "category": item.get("category", "Unknown"),
+                        "suggested_attacks": item.get("suggested_attacks", []),
+                        "priority_level": priority_level,
+                    }
+
+        # Match vectors to Katana endpoints
+        enriched_count = 0
+        for vector in vectors:
+            # Try exact match first
+            matched_info = None
+            if vector.endpoint in endpoint_lookup:
+                matched_info = endpoint_lookup[vector.endpoint]
+            elif vector.url in endpoint_lookup:
+                matched_info = endpoint_lookup[vector.url]
+            else:
+                # Try partial match - check if vector endpoint is in any Katana endpoint
+                for ep, info in endpoint_lookup.items():
+                    # Match on path component
+                    vector_path = vector.endpoint.split("?")[0]
+                    ep_path = ep.split("?")[0]
+                    if vector_path == ep_path or vector_path in ep or ep_path in vector_path:
+                        matched_info = info
+                        break
+
+            if matched_info:
+                vector.endpoint_category = matched_info["category"]
+                vector.katana_priority_level = matched_info.get("priority_level")
+                enriched_count += 1
+
+                # Add Katana-suggested attacks that aren't already present
+                for attack in matched_info.get("suggested_attacks", []):
+                    if attack not in vector.suggested_attacks:
+                        vector.suggested_attacks.append(attack)
+
+        logger.info(
+            f"Enriched {enriched_count}/{len(vectors)} attack vectors with "
+            f"Katana endpoint categories"
+        )
+
+        return vectors
+
+    def _apply_category_priority_boost(
+        self, vectors: List[AttackVector]
+    ) -> List[AttackVector]:
+        """Apply priority adjustments based on endpoint category and Katana priority level.
+
+        Boosts priority (lower number) for high-risk categories and
+        penalizes low-risk categories. Also adjusts based on AI-assessed
+        Katana priority levels so high-risk endpoints are tested first.
+
+        Args:
+            vectors: List of attack vectors to adjust.
+
+        Returns:
+            Vectors with adjusted priorities.
+        """
+        # Priority boost mapping (negative = higher priority, positive = lower priority)
+        category_boost = {
+            "Authentication": -2,      # Critical - boost priority
+            "Admin Panel": -2,         # Critical - boost priority
+            "File Operation": -1,      # High risk - boost
+            "Payment/Financial": -1,   # High risk - boost
+            "API Endpoint": 0,         # Neutral
+            "Database Query": 0,       # Neutral
+            "User Profile": 0,         # Neutral
+            "Static Resource": 2,      # Low risk - deprioritize
+            "Unknown": 0,              # Neutral
+        }
+
+        # Katana priority level adjustments (negative = higher priority)
+        priority_level_boost = {
+            "high_priority": -1,    # AI-assessed high-risk - boost priority
+            "medium_priority": 0,   # Neutral
+            "low_priority": 1,      # AI-assessed low-risk - deprioritize
+        }
+
+        for vector in vectors:
+            original_priority = vector.priority
+            total_boost = 0
+
+            # Apply category-based boost
+            if vector.endpoint_category:
+                total_boost += category_boost.get(vector.endpoint_category, 0)
+
+            # Apply Katana priority level boost
+            if vector.katana_priority_level:
+                total_boost += priority_level_boost.get(
+                    vector.katana_priority_level, 0
+                )
+
+            # Apply combined boost and clamp to 1-5
+            if total_boost != 0:
+                new_priority = max(1, min(5, vector.priority + total_boost))
+                if new_priority != original_priority:
+                    logger.debug(
+                        f"Adjusted priority for {vector.element_name}: "
+                        f"{original_priority} -> {new_priority} "
+                        f"(category: {vector.endpoint_category}, "
+                        f"katana_level: {vector.katana_priority_level})"
+                    )
+                    vector.priority = new_priority
+
         return vectors
 
     def _parse_smart_attack_response(self, response: str) -> Dict[str, Any]:
@@ -1846,24 +2736,94 @@ class DASTScanner:
     def _check_for_vulnerability(self, analysis: str) -> bool:
         """Check if AI analysis indicates a vulnerability was found.
 
+        Uses multiple detection strategies:
+        1. Positive indicators that suggest vulnerability
+        2. Negative indicators that suggest no vulnerability
+        3. Technical evidence patterns
+
         Args:
             analysis: AI analysis text.
 
         Returns:
             True if vulnerability indicators are present.
         """
-        indicators = [
+        analysis_lower = analysis.lower()
+
+        # Strong negative indicators - if present, likely NOT vulnerable
+        negative_indicators = [
+            "no vulnerability",
+            "not vulnerable",
+            "no security issue",
+            "appears safe",
+            "properly sanitized",
+            "properly escaped",
+            "no evidence of",
+            "low confidence",
+            "severity: none",
+            "no findings",
+        ]
+
+        # Check for explicit negative indicators first
+        for neg in negative_indicators:
+            if neg in analysis_lower:
+                # But check if it's negated (e.g., "not properly sanitized")
+                neg_idx = analysis_lower.find(neg)
+                prefix = analysis_lower[max(0, neg_idx-10):neg_idx]
+                if "not" not in prefix and "no" not in prefix:
+                    return False
+
+        # Strong positive indicators
+        positive_indicators = [
             "vulnerability found",
+            "vulnerability detected",
             "vulnerable",
             "security issue",
+            "security vulnerability",
             "high confidence",
             "confirmed vulnerability",
             "exploitable",
             "severity: critical",
             "severity: high",
+            "severity: medium",
+            "sql injection",
+            "xss",
+            "cross-site scripting",
+            "command injection",
+            "path traversal",
+            "directory traversal",
+            "authentication bypass",
+            "broken access control",
+            "information disclosure",
+            "sensitive data exposure",
+            "error message reveals",
+            "stack trace",
+            "database error",
+            "syntax error",
+            "sql error",
         ]
-        analysis_lower = analysis.lower()
-        return any(indicator in analysis_lower for indicator in indicators)
+
+        # Check for positive indicators
+        for pos in positive_indicators:
+            if pos in analysis_lower:
+                return True
+
+        # Technical evidence patterns (SQL injection indicators in response)
+        sql_error_patterns = [
+            "mysql",
+            "sqlite",
+            "postgresql",
+            "ora-",
+            "sql server",
+            "syntax error",
+            "unclosed quotation",
+            "unterminated string",
+        ]
+
+        for pattern in sql_error_patterns:
+            if pattern in analysis_lower:
+                return True
+
+        return False
 
     def _parse_and_record_vulnerability(
         self,
@@ -2216,6 +3176,66 @@ class DASTScanner:
             if match:
                 return match.group(1).strip()
         return None
+
+    def _parse_katana_analysis_response(self, response: str) -> Dict[str, Any]:
+        """Parse LLM response from Katana endpoint analysis.
+
+        Extracts JSON from the response, handling markdown code blocks
+        and validating the expected structure.
+
+        Args:
+            response: LLM response text (may contain markdown).
+
+        Returns:
+            Dictionary with high_priority, medium_priority, low_priority lists.
+        """
+        import json
+
+        # Try to extract JSON from markdown code block first
+        json_block_match = re.search(
+            r'```(?:json)?\s*([\s\S]*?)```', response
+        )
+
+        if json_block_match:
+            json_str = json_block_match.group(1).strip()
+        else:
+            # Try to find raw JSON object
+            json_obj_match = re.search(r'\{[\s\S]*\}', response)
+            if json_obj_match:
+                json_str = json_obj_match.group()
+            else:
+                logger.warning("No JSON found in Katana analysis response")
+                return {}
+
+        try:
+            data = json.loads(json_str)
+
+            # Validate expected structure
+            result = {
+                "high_priority": data.get("high_priority", []),
+                "medium_priority": data.get("medium_priority", []),
+                "low_priority": data.get("low_priority", []),
+                "summary": data.get("summary", {}),
+            }
+
+            # Validate each endpoint entry has required fields
+            for priority_level in ["high_priority", "medium_priority", "low_priority"]:
+                validated_endpoints = []
+                for item in result[priority_level]:
+                    if isinstance(item, dict) and "endpoint" in item:
+                        validated_endpoints.append({
+                            "endpoint": item.get("endpoint", ""),
+                            "category": item.get("category", "Unknown"),
+                            "reasoning": item.get("reasoning", ""),
+                            "suggested_attacks": item.get("suggested_attacks", []),
+                        })
+                result[priority_level] = validated_endpoints
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse Katana analysis JSON: {e}")
+            return {}
 
     def _format_technology_hints(self) -> str:
         """Format detected technology hints as a string.

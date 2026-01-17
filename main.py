@@ -276,17 +276,20 @@ def print_scan_progress(progress: ScanProgress, quiet: bool = False) -> None:
             _last_progress_len = 0
 
 
-def create_progress_callback(quiet: bool = False):
+def create_progress_callback(quiet: bool = False, verbose: bool = False):
     """Create a progress callback function for the scanner.
 
     Args:
         quiet: If True, callback does nothing.
+        verbose: If True, show detailed Katana status updates.
 
     Returns:
         Callback function that accepts ScanProgress.
     """
     def callback(progress: ScanProgress) -> None:
         print_scan_progress(progress, quiet=quiet)
+        if verbose and progress.katana_scan_active:
+            print_katana_status(progress)
     return callback
 
 
@@ -299,6 +302,37 @@ def format_duration(seconds: float) -> str:
         return f"{minutes}m {secs}s"
     hours, mins = divmod(minutes, 60)
     return f"{hours}h {mins}m {secs}s"
+
+
+def print_katana_status(progress: ScanProgress) -> None:
+    """Print detailed Katana scan status in verbose mode.
+
+    Args:
+        progress: ScanProgress object with current Katana state.
+    """
+    if not progress.katana_scan_active:
+        return
+
+    timestamp = time.strftime("%H:%M:%S")
+    phase_emoji = {
+        "initializing": "🚀",
+        "crawling": "🕷️",
+        "parsing": "📋",
+        "extracting_forms": "📝"
+    }
+    emoji = phase_emoji.get(progress.katana_status_phase, "🔍")
+
+    depth_info = ""
+    if progress.katana_crawl_depth_max > 0:
+        depth_info = (
+            f"Depth: {progress.katana_crawl_depth_current}/"
+            f"{progress.katana_crawl_depth_max} | "
+        )
+
+    print(
+        f"[{timestamp}] {emoji} Katana: {progress.katana_status_phase} | "
+        f"{depth_info}Endpoints: {progress.katana_endpoints_discovered}"
+    )
 
 
 def print_summary(scan_results: dict, report_path: str) -> None:
@@ -343,6 +377,9 @@ def print_summary(scan_results: dict, report_path: str) -> None:
     print(f"     • Requests:       {total_requests}")
     print(f"     • Endpoints:      {endpoints}")
     print(f"     • Forms Found:    {forms_discovered}")
+    if stats.get("katana_used", False):
+        katana_endpoints = stats.get("katana_endpoints_discovered", 0)
+        print(f"     • Katana Endpoints: {katana_endpoints}")
     print(f"     • Provider:       {provider_display}")
     print(f"     • Model:          {model_name}")
     print()
@@ -455,7 +492,7 @@ def main() -> int:
         print_progress("Initializing scanner...", "🚀")
 
     # Create progress callback for real-time updates
-    progress_callback = create_progress_callback(quiet=args.quiet)
+    progress_callback = create_progress_callback(quiet=args.quiet, verbose=args.verbose)
 
     try:
         scanner = DASTScanner(
@@ -537,6 +574,21 @@ def main() -> int:
         display_provider = effective_provider
     if not args.quiet:
         print_scan_info(args.target, display_provider, model_name, args.verify_ssl)
+
+    # Check Katana availability and inform user
+    if not args.quiet:
+        try:
+            if scanner._katana_client.is_katana_installed():
+                print_progress(
+                    "Katana detected - enhanced endpoint discovery enabled", "✅"
+                )
+            else:
+                print_progress(
+                    "Katana not found - using manual crawling "
+                    "(install for better coverage)", "⚠️"
+                )
+        except Exception:
+            pass  # Silently continue if check fails
 
     # Execute scan
     if not args.quiet:

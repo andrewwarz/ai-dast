@@ -24,6 +24,25 @@ ollama serve &             # Start Ollama
 ollama pull qwen3          # Download a model
 ```
 
+### 2.5. Setup Katana (Endpoint Discovery)
+
+Katana is a fast crawler with headless browser support for comprehensive endpoint discovery.
+
+```bash
+# macOS
+brew install katana
+
+# Linux/macOS (via Go)
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+
+# Verify installation
+katana -version
+```
+
+> **Note:** Katana is optional but recommended for better endpoint discovery. The scanner will fall back to manual crawling if not installed.
+
+For more information: https://github.com/projectdiscovery/katana
+
 ### 3. Run Test Target
 
 ```bash
@@ -285,6 +304,7 @@ The test suite uses pytest markers to categorize tests:
 | `integration` | Tests requiring external services (vulnerable app and/or Ollama) |
 | `requires_target` | Tests specifically requiring the vulnerable application on localhost:8080 |
 | `requires_ollama` | Tests specifically requiring Ollama on localhost:11434 |
+| `requires_katana` | Tests specifically requiring Katana to be installed |
 | `slow` | Slow-running tests (full scans, performance tests) |
 
 ### Running Tests
@@ -307,6 +327,26 @@ pytest tests/ -m "requires_target"
 **Run only Ollama integration tests:**
 ```bash
 pytest tests/ -m "requires_ollama"
+```
+
+**Run Katana tests (requires Katana installed):**
+```bash
+pytest tests/test_katana_client.py -v
+```
+
+**Run Katana unit tests only (no Katana required):**
+```bash
+pytest tests/test_katana_client.py -m "not requires_katana" -v
+```
+
+**Run Katana integration tests:**
+```bash
+pytest tests/test_integration.py::TestKatanaIntegration -v
+```
+
+**Skip all Katana tests:**
+```bash
+pytest tests/ -m "not requires_katana"
 ```
 
 **Exclude slow tests:**

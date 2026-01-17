@@ -50,6 +50,10 @@ htmlcov/
 reports/
 *.md.bak
 
+# Database files
+*.db
+vulnerable-app/vulnerable.db
+
 # OS
 .DS_Store
 Thumbs.db

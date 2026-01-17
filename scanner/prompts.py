@@ -378,6 +378,77 @@ Generate payloads that are SPECIFIC to this context, not generic."""
 
 
 # =============================================================================
+# KATANA RESULTS ANALYSIS PROMPT
+# =============================================================================
+
+KATANA_RESULTS_ANALYSIS_PROMPT = """You are an expert security analyst reviewing crawled endpoints from a web application. Analyze these endpoints and categorize them by security risk level.
+
+## Target Application:
+${target_url}
+
+## Discovered Endpoints:
+${endpoints_list}
+
+## Your Task:
+Categorize each endpoint into one of these security-relevant categories:
+- **Authentication**: Login, logout, password reset, registration, session management
+- **API Endpoint**: REST/GraphQL APIs, JSON endpoints, data services
+- **Admin Panel**: Administrative interfaces, management dashboards, config pages
+- **File Operation**: Upload, download, file management, document handling
+- **Database Query**: Search, listings, filtered views, data lookups with parameters
+- **User Profile**: Account settings, preferences, personal data management
+- **Payment/Financial**: Checkout, payment processing, billing, subscriptions
+- **Static Resource**: CSS, JS, images, fonts (low security priority)
+- **Unknown**: Cannot determine purpose
+
+## Output Format (JSON):
+```json
+{
+  "high_priority": [
+    {
+      "endpoint": "/admin/login.php",
+      "category": "Authentication",
+      "reasoning": "Admin login - prime target for auth bypass and SQLi",
+      "suggested_attacks": ["SQL Injection", "Authentication Bypass", "Brute Force"]
+    }
+  ],
+  "medium_priority": [
+    {
+      "endpoint": "/api/users",
+      "category": "API Endpoint",
+      "reasoning": "User data API - potential IDOR and data exposure",
+      "suggested_attacks": ["Broken Access Control", "IDOR", "Information Disclosure"]
+    }
+  ],
+  "low_priority": [
+    {
+      "endpoint": "/static/style.css",
+      "category": "Static Resource",
+      "reasoning": "Static asset - minimal attack surface",
+      "suggested_attacks": []
+    }
+  ],
+  "summary": {
+    "total_endpoints": 50,
+    "high_risk_count": 5,
+    "medium_risk_count": 15,
+    "low_risk_count": 30,
+    "key_attack_surfaces": ["Admin panel at /admin", "User API at /api/users", "File upload at /upload"]
+  }
+}
+```
+
+Prioritize endpoints that:
+1. Handle authentication or authorization
+2. Accept user input via parameters
+3. Perform database operations
+4. Handle file operations
+5. Access sensitive data or admin functions
+
+Be thorough and security-focused in your analysis."""
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
